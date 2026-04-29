@@ -478,7 +478,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             mvBlockSize = 16;
         auto mvOverlap{ vsapi->mapGetIntSaturated(in, "mv_overlap", 0, &err) };
         if (err)
-            mvOverlap = 0;
+            mvOverlap = 8;
         auto mvPel{ vsapi->mapGetIntSaturated(in, "mv_pel", 0, &err) };
         if (err)
             mvPel = 1;
@@ -494,7 +494,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             mvVPadding = 0;
         auto mvBlockReduce{ vsapi->mapGetIntSaturated(in, "mv_block_reduce", 0, &err) };
         if (err)
-            mvBlockReduce = MVBlockReduceCenter;
+            mvBlockReduce = MVBlockReduceAverage;
         d->mvUseChroma = !!vsapi->mapGetInt(in, "mv_chroma", 0, &err);
         mvClip = vsapi->mapGetNode(in, "mv_clip", 0, &err);
         if (!err) {
@@ -1056,6 +1056,49 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
     d.release();
 }
 
+static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
+    auto* plugin = vsapi->getPluginByID("com.holywu.rife", core);
+    if (!plugin) {
+        vsapi->mapSetError(out, "RIFEMV: failed to find RIFE plugin");
+        return;
+    }
+
+    auto* args = vsapi->createMap();
+    auto* ret = static_cast<VSMap*>(nullptr);
+    VSNode* bwNode{};
+    VSNode* fwNode{};
+
+    vsapi->copyMap(in, args);
+    vsapi->mapSetInt(args, "mv", 1, maReplace);
+
+    vsapi->mapSetInt(args, "mv_backward", 1, maReplace);
+    ret = vsapi->invoke(plugin, "RIFE", args);
+    if (vsapi->mapGetError(ret)) {
+        vsapi->mapSetError(out, vsapi->mapGetError(ret));
+        vsapi->freeMap(ret);
+        vsapi->freeMap(args);
+        return;
+    }
+    bwNode = vsapi->mapGetNode(ret, "clip", 0, nullptr);
+    vsapi->freeMap(ret);
+
+    vsapi->mapSetInt(args, "mv_backward", 0, maReplace);
+    ret = vsapi->invoke(plugin, "RIFE", args);
+    if (vsapi->mapGetError(ret)) {
+        vsapi->mapSetError(out, vsapi->mapGetError(ret));
+        vsapi->freeNode(bwNode);
+        vsapi->freeMap(ret);
+        vsapi->freeMap(args);
+        return;
+    }
+    fwNode = vsapi->mapGetNode(ret, "clip", 0, nullptr);
+    vsapi->freeMap(ret);
+    vsapi->freeMap(args);
+
+    vsapi->mapConsumeNode(out, "clip", bwNode, maAppend);
+    vsapi->mapConsumeNode(out, "clip", fwNode, maAppend);
+}
+
 //////////////////////////////////////////
 // Init
 
@@ -1092,4 +1135,23 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "list_gpu:int:opt;",
                              "clip:vnode;",
                              rifeCreate, nullptr, plugin);
+
+    vspapi->registerFunction("RIFEMV",
+                             "clip:vnode;"
+                             "model:int:opt;"
+                             "model_path:data:opt;"
+                             "gpu_id:int:opt;"
+                             "gpu_thread:int:opt;"
+                             "uhd:int:opt;"
+                             "mv_block_size:int:opt;"
+                             "mv_overlap:int:opt;"
+                             "mv_pel:int:opt;"
+                             "mv_bits:int:opt;"
+                             "mv_clip:vnode:opt;"
+                             "mv_hpad:int:opt;"
+                             "mv_vpad:int:opt;"
+                             "mv_block_reduce:int:opt;"
+                             "mv_chroma:int:opt;",
+                             "clip:vnode[];",
+                             rifeMVCreate, nullptr, plugin);
 }
