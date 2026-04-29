@@ -28,6 +28,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <semaphore>
 #include <string>
 #include <vector>
@@ -40,6 +41,7 @@
 using namespace std::literals;
 
 static std::atomic<int> numGPUInstances{ 0 };
+static std::mutex motionVectorExportMutex;
 
 struct RIFEData;
 
@@ -101,6 +103,14 @@ static double rgbToLuma(const float r, const float g, const float b) noexcept {
 
 static int clampPixel(const int value, const int limit) noexcept {
     return std::clamp(value, 0, limit - 1);
+}
+
+static int clampMotionVectorComponent(const int value, const int pel, const int blockCoord,
+                                      const int blockSize, const int size, const int padding) noexcept {
+    const auto minPixelDelta = -padding - blockCoord;
+    const auto maxPixelDelta = size - blockSize + padding - blockCoord;
+
+    return std::clamp(value, minPixelDelta * pel, maxPixelDelta * pel);
 }
 
 } // namespace
@@ -220,6 +230,8 @@ static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VS
 
                 vector.x = static_cast<int>(std::lround(-2.0f * flowX * d->mvPel));
                 vector.y = static_cast<int>(std::lround(-2.0f * flowY * d->mvPel));
+                vector.x = clampMotionVectorComponent(vector.x, d->mvPel, blockX, d->mvBlockSize, width, d->mvHPadding);
+                vector.y = clampMotionVectorComponent(vector.y, d->mvPel, blockY, d->mvBlockSize, height, d->mvVPadding);
                 vector.sad = computeBlockSAD(current, reference,
                                              static_cast<int>(std::lround(static_cast<double>(vector.x) / d->mvPel)),
                                              static_cast<int>(std::lround(static_cast<double>(vector.y) / d->mvPel)),
@@ -285,6 +297,7 @@ static bool attachMotionVectors(const VSFrame* current, const VSFrame* reference
         const auto secondB = reinterpret_cast<const float*>(vsapi->getReadPtr(second, 2));
 
         d->semaphore->acquire();
+        const std::lock_guard<std::mutex> motionVectorExportGuard(motionVectorExportMutex);
         const auto status = d->rife->process_flow(firstR, firstG, firstB, secondR, secondG, secondB, flow.data(), width, height, stride);
         d->semaphore->release();
         if (status != 0)
