@@ -159,7 +159,7 @@ static float reduceBlockFlow(const float* flowPlane, const int width, const int 
 static int64_t computeBlockSAD(const VSFrame* current, const VSFrame* reference, const int pixelDx, const int pixelDy,
                                const int blockX, const int blockY, const int width, const int height,
                                const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept {
-    const auto stride = vsapi->getStride(current, 0) / d->vi.format.bytesPerSample;
+    const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
     const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
     const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
     const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
@@ -269,7 +269,7 @@ static bool attachMotionVectors(const VSFrame* current, const VSFrame* reference
                                 const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept {
     const auto width = vsapi->getFrameWidth(current, 0);
     const auto height = vsapi->getFrameHeight(current, 0);
-    const auto stride = vsapi->getStride(current, 0) / d->vi.format.bytesPerSample;
+    const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
     auto props = vsapi->getFramePropertiesRW(dst);
     std::vector<char> vectorBlob;
 
@@ -324,7 +324,12 @@ static const VSFrame* VS_CC rifeGetFrame(int n, int activationReason, void* inst
                 reference = vsapi->getFrameFilter(n - 1, d->node, frameCtx);
             }
 
-            auto dst = vsapi->copyFrame(current, core);
+            auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, current, core);
+            auto* dstp = vsapi->getWritePtr(dst, 0);
+            const auto dstStride = vsapi->getStride(dst, 0);
+            for (auto y = 0; y < d->vi.height; y++)
+                std::memset(dstp + static_cast<size_t>(y) * dstStride, 0, d->vi.width * d->vi.format.bytesPerSample);
+
             if (!attachMotionVectors(current, reference, dst, d, vsapi)) {
                 vsapi->freeFrame(current);
                 vsapi->freeFrame(reference);
@@ -910,6 +915,9 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             d->mvAnalysisData.xRatioUV = 1;
             d->mvAnalysisData.nHPadding = d->mvHPadding;
             d->mvAnalysisData.nVPadding = d->mvVPadding;
+
+            if (!vsapi->getVideoFormatByID(&d->vi.format, pfGray8, core))
+                throw "failed to create mv=True output format";
         }
 
         d->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
