@@ -41,6 +41,8 @@ using namespace std::literals;
 
 static std::atomic<int> numGPUInstances{ 0 };
 
+struct RIFEData;
+
 namespace {
 
 constexpr auto MVToolsAnalysisDataKey = "MVTools_MVAnalysisData";
@@ -102,14 +104,14 @@ static int clampPixel(const int value, const int limit) noexcept {
 }
 
 static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
-                             const int blockX, const int blockY, const struct RIFEData* const VS_RESTRICT d) noexcept;
+                                                         const int blockX, const int blockY, const RIFEData* const VS_RESTRICT d) noexcept;
 
 static int64_t computeBlockSAD(const VSFrame* current, const VSFrame* reference, const int pixelDx, const int pixelDy,
                                const int blockX, const int blockY, const int width, const int height,
-                               const struct RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept;
+                                                             const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept;
 
 static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* reference, const float* flow,
-                                                const bool valid, const struct RIFEData* const VS_RESTRICT d,
+                                                                                                const bool valid, const RIFEData* const VS_RESTRICT d,
                                                 const VSAPI* vsapi);
 
 } // namespace
@@ -1025,7 +1027,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
     std::vector<VSFilterDependency> deps{ {d->node, rpGeneral} };
     if (d->skip)
         deps.push_back({ d->psnr, rpGeneral });
-    vsapi->createVideoFilter(out, "RIFE", &d->vi, rifeGetFrame, rifeFree, fmParallel, deps.data(), deps.size(), d.get(), core);
+    vsapi->createVideoFilter(out, "RIFE", &d->vi, rifeGetFrame, rifeFree, fmParallel, deps.data(), static_cast<int>(deps.size()), d.get(), core);
     d.release();
 }
 
