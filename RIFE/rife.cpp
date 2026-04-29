@@ -516,27 +516,23 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     ncnn::Mat flow_cpu_unpacked;
     if (flow_cpu.elempack != 1)
     {
-        ncnn::Layer* packing = ncnn::create_layer("Packing");
-        ncnn::ParamDict pd;
-        pd.set(0, 1);
-        packing->load_param(pd);
-
-        ncnn::Option unpack_opt = flownet.opt;
-        unpack_opt.blob_allocator = 0;
-        unpack_opt.workspace_allocator = 0;
-        unpack_opt.blob_vkallocator = 0;
-        unpack_opt.workspace_vkallocator = 0;
-        unpack_opt.staging_vkallocator = 0;
-
-        if (packing->forward(flow_cpu, flow_cpu_unpacked, unpack_opt) != 0)
+        // Manually unpack interleaved elempack>1 mat to elempack=1.
+        // NCNN packed layout: channel(cg)[pixel_index * elempack + ep_idx] = channel cg*elempack+ep_idx at that pixel.
+        const int ep = flow_cpu.elempack;
+        const int actual_c = flow_cpu.c * ep;
+        flow_cpu_unpacked.create(flow_cpu.w, flow_cpu.h, actual_c, sizeof(float));
+        for (int cg = 0; cg < flow_cpu.c; cg++)
         {
-            delete packing;
-            vkdev->reclaim_blob_allocator(blob_vkallocator);
-            vkdev->reclaim_staging_allocator(staging_vkallocator);
-            return -1;
+            const auto* packed = static_cast<const float*>(flow_cpu.channel(cg));
+            for (int ep_idx = 0; ep_idx < ep; ep_idx++)
+            {
+                auto* dst = static_cast<float*>(flow_cpu_unpacked.channel(cg * ep + ep_idx));
+                for (int i = 0; i < flow_cpu.w * flow_cpu.h; i++)
+                {
+                    dst[i] = packed[static_cast<size_t>(i) * ep + ep_idx];
+                }
+            }
         }
-
-        delete packing;
     }
     else
     {
