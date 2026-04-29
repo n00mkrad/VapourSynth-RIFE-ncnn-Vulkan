@@ -28,7 +28,6 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
-#include <mutex>
 #include <semaphore>
 #include <string>
 #include <vector>
@@ -41,7 +40,6 @@
 using namespace std::literals;
 
 static std::atomic<int> numGPUInstances{ 0 };
-static std::mutex motionVectorExportMutex;
 
 struct RIFEData;
 
@@ -297,7 +295,6 @@ static bool attachMotionVectors(const VSFrame* current, const VSFrame* reference
         const auto secondB = reinterpret_cast<const float*>(vsapi->getReadPtr(second, 2));
 
         d->semaphore->acquire();
-        const std::lock_guard<std::mutex> motionVectorExportGuard(motionVectorExportMutex);
         const auto status = d->rife->process_flow(firstR, firstG, firstB, secondR, secondG, secondB, flow.data(), width, height, stride);
         d->semaphore->release();
         if (status != 0)
