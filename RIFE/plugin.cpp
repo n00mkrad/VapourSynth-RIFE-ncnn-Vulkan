@@ -23,6 +23,9 @@
 */
 
 #include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <semaphore>
@@ -38,19 +41,218 @@ using namespace std::literals;
 
 static std::atomic<int> numGPUInstances{ 0 };
 
+namespace {
+
+constexpr auto MVToolsAnalysisDataKey = "MVTools_MVAnalysisData";
+constexpr auto MVToolsVectorsKey = "MVTools_vectors";
+constexpr int MotionIsBackward = 0x00000002;
+constexpr int MotionUseChromaMotion = 0x00000008;
+constexpr int MVBlockReduceCenter = 0;
+constexpr int MVBlockReduceAverage = 1;
+
+using MVArraySizeType = int;
+
+struct MVToolsVector final {
+    int x;
+    int y;
+    int64_t sad;
+};
+
+struct MVAnalysisData final {
+    int nMagicKey;
+    int nVersion;
+    int nBlkSizeX;
+    int nBlkSizeY;
+    int nPel;
+    int nLvCount;
+    int nDeltaFrame;
+    int isBackward;
+    int nCPUFlags;
+    int nMotionFlags;
+    int nWidth;
+    int nHeight;
+    int nOverlapX;
+    int nOverlapY;
+    int nBlkX;
+    int nBlkY;
+    int bitsPerSample;
+    int yRatioUV;
+    int xRatioUV;
+    int nHPadding;
+    int nVPadding;
+};
+
+static_assert(sizeof(MVArraySizeType) == 4);
+static_assert(sizeof(MVToolsVector) == 16);
+static_assert(sizeof(MVAnalysisData) == 84);
+
+static int computeBlockCount(const int size, const int blockSize, const int overlap, const int padding) noexcept {
+    const auto step = blockSize - overlap;
+    const auto paddedSize = size + padding * 2;
+
+    return std::max(1, (paddedSize - overlap + step - 1) / step);
+}
+
+static double rgbToLuma(const float r, const float g, const float b) noexcept {
+    return r * 0.2126 + g * 0.7152 + b * 0.0722;
+}
+
+static int clampPixel(const int value, const int limit) noexcept {
+    return std::clamp(value, 0, limit - 1);
+}
+
+static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
+                             const int blockX, const int blockY, const struct RIFEData* const VS_RESTRICT d) noexcept;
+
+static int64_t computeBlockSAD(const VSFrame* current, const VSFrame* reference, const int pixelDx, const int pixelDy,
+                               const int blockX, const int blockY, const int width, const int height,
+                               const struct RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept;
+
+static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* reference, const float* flow,
+                                                const bool valid, const struct RIFEData* const VS_RESTRICT d,
+                                                const VSAPI* vsapi);
+
+} // namespace
+
 struct RIFEData final {
     VSNode* node;
     VSNode* psnr;
     VSVideoInfo vi;
+    bool exportMotionVectors;
     bool sceneChange;
     bool skip;
+    bool mvBackward;
+    bool mvUseChroma;
     double skipThreshold;
     int64_t factor;
     int64_t factorNum;
     int64_t factorDen;
+    int mvBlockSize;
+    int mvOverlap;
+    int mvStepX;
+    int mvStepY;
+    int mvPel;
+    int mvBits;
+    int mvHPadding;
+    int mvVPadding;
+    int mvBlkX;
+    int mvBlkY;
+    int mvBlockReduce;
+    int64_t mvInvalidSad;
+    MVAnalysisData mvAnalysisData;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
 };
+
+static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
+                             const int blockX, const int blockY, const RIFEData* const VS_RESTRICT d) noexcept {
+    if (d->mvBlockReduce == MVBlockReduceCenter) {
+        const auto sampleY = clampPixel(blockY + d->mvBlockSize / 2, height);
+        const auto sampleX = clampPixel(blockX + d->mvBlockSize / 2, width);
+
+        return flowPlane[sampleY * width + sampleX];
+    }
+
+    double sum{};
+    for (auto y = 0; y < d->mvBlockSize; y++) {
+        const auto sampleY = clampPixel(blockY + y, height);
+        for (auto x = 0; x < d->mvBlockSize; x++) {
+            const auto sampleX = clampPixel(blockX + x, width);
+            sum += flowPlane[sampleY * width + sampleX];
+        }
+    }
+
+    return static_cast<float>(sum / static_cast<double>(d->mvBlockSize * d->mvBlockSize));
+}
+
+static int64_t computeBlockSAD(const VSFrame* current, const VSFrame* reference, const int pixelDx, const int pixelDy,
+                               const int blockX, const int blockY, const int width, const int height,
+                               const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept {
+    const auto stride = vsapi->getStride(current, 0) / d->vi.format.bytesPerSample;
+    const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
+    const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
+    const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
+    const auto referenceR = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 0));
+    const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
+    const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
+    const auto maxSample = static_cast<double>((1ULL << d->mvBits) - 1ULL);
+    int64_t sad{};
+
+    for (auto y = 0; y < d->mvBlockSize; y++) {
+        const auto currentY = clampPixel(blockY + y, height);
+        const auto referenceY = clampPixel(currentY + pixelDy, height);
+        for (auto x = 0; x < d->mvBlockSize; x++) {
+            const auto currentX = clampPixel(blockX + x, width);
+            const auto referenceX = clampPixel(currentX + pixelDx, width);
+            const auto currentIndex = currentY * stride + currentX;
+            const auto referenceIndex = referenceY * stride + referenceX;
+
+            if (d->mvUseChroma) {
+                sad += static_cast<int64_t>(std::llround((std::abs(currentR[currentIndex] - referenceR[referenceIndex]) +
+                                                          std::abs(currentG[currentIndex] - referenceG[referenceIndex]) +
+                                                          std::abs(currentB[currentIndex] - referenceB[referenceIndex])) * maxSample));
+            } else {
+                sad += static_cast<int64_t>(std::llround(std::abs(rgbToLuma(currentR[currentIndex], currentG[currentIndex], currentB[currentIndex]) -
+                                                                 rgbToLuma(referenceR[referenceIndex], referenceG[referenceIndex], referenceB[referenceIndex])) * maxSample));
+            }
+        }
+    }
+
+    return sad;
+}
+
+static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* reference, const float* flow,
+                                                const bool valid, const RIFEData* const VS_RESTRICT d,
+                                                const VSAPI* vsapi) {
+    const auto vectorCount = static_cast<size_t>(d->mvBlkX) * d->mvBlkY;
+    std::vector<MVToolsVector> vectors(vectorCount);
+
+    if (!valid) {
+        for (auto& vector : vectors) {
+            vector.x = 0;
+            vector.y = 0;
+            vector.sad = d->mvInvalidSad;
+        }
+    } else {
+        const auto width = vsapi->getFrameWidth(current, 0);
+        const auto height = vsapi->getFrameHeight(current, 0);
+        const auto channelOffset = d->mvBackward ? 0 : 2;
+        const auto flowPlaneSize = width * height;
+
+        for (auto by = 0; by < d->mvBlkY; by++) {
+            const auto blockY = by * d->mvStepY - d->mvVPadding;
+            for (auto bx = 0; bx < d->mvBlkX; bx++) {
+                const auto blockX = bx * d->mvStepX - d->mvHPadding;
+                auto& vector = vectors[static_cast<size_t>(by) * d->mvBlkX + bx];
+                const auto flowX = reduceBlockFlow(flow + (channelOffset + 0) * flowPlaneSize, width, height, blockX, blockY, d);
+                const auto flowY = reduceBlockFlow(flow + (channelOffset + 1) * flowPlaneSize, width, height, blockX, blockY, d);
+
+                vector.x = static_cast<int>(std::lround(-2.0f * flowX * d->mvPel));
+                vector.y = static_cast<int>(std::lround(-2.0f * flowY * d->mvPel));
+                vector.sad = computeBlockSAD(current, reference,
+                                             static_cast<int>(std::lround(static_cast<double>(vector.x) / d->mvPel)),
+                                             static_cast<int>(std::lround(static_cast<double>(vector.y) / d->mvPel)),
+                                             blockX, blockY, width, height, d, vsapi);
+            }
+        }
+    }
+
+    const auto planeSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) + vectors.size() * sizeof(MVToolsVector));
+    const auto groupSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2 + planeSize);
+    std::vector<char> blob(groupSize);
+    size_t offset{};
+    const auto writeScalar = [&](const auto value) {
+        std::memcpy(blob.data() + offset, &value, sizeof(value));
+        offset += sizeof(value);
+    };
+
+    writeScalar(groupSize);
+    writeScalar(valid ? MVArraySizeType{ 1 } : MVArraySizeType{ 0 });
+    writeScalar(planeSize);
+    std::memcpy(blob.data() + offset, vectors.data(), vectors.size() * sizeof(MVToolsVector));
+
+    return blob;
+}
 
 static void filter(const VSFrame* src0, const VSFrame* src1, VSFrame* dst,
                    const float timestep, const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept {
@@ -72,9 +274,81 @@ static void filter(const VSFrame* src0, const VSFrame* src1, VSFrame* dst,
     d->semaphore->release();
 }
 
+static bool attachMotionVectors(const VSFrame* current, const VSFrame* reference, VSFrame* dst,
+                                const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept {
+    const auto width = vsapi->getFrameWidth(current, 0);
+    const auto height = vsapi->getFrameHeight(current, 0);
+    const auto stride = vsapi->getStride(current, 0) / d->vi.format.bytesPerSample;
+    auto props = vsapi->getFramePropertiesRW(dst);
+    std::vector<char> vectorBlob;
+
+    if (reference) {
+        std::vector<float> flow(static_cast<size_t>(width) * height * 4);
+        const auto first = d->mvBackward ? current : reference;
+        const auto second = d->mvBackward ? reference : current;
+        const auto firstR = reinterpret_cast<const float*>(vsapi->getReadPtr(first, 0));
+        const auto firstG = reinterpret_cast<const float*>(vsapi->getReadPtr(first, 1));
+        const auto firstB = reinterpret_cast<const float*>(vsapi->getReadPtr(first, 2));
+        const auto secondR = reinterpret_cast<const float*>(vsapi->getReadPtr(second, 0));
+        const auto secondG = reinterpret_cast<const float*>(vsapi->getReadPtr(second, 1));
+        const auto secondB = reinterpret_cast<const float*>(vsapi->getReadPtr(second, 2));
+
+        d->semaphore->acquire();
+        const auto status = d->rife->process_flow(firstR, firstG, firstB, secondR, secondG, secondB, flow.data(), width, height, stride);
+        d->semaphore->release();
+        if (status != 0)
+            return false;
+
+        vectorBlob = buildMVToolsVectorBlob(current, reference, flow.data(), true, d, vsapi);
+    } else {
+        vectorBlob = buildMVToolsVectorBlob(current, current, nullptr, false, d, vsapi);
+    }
+
+    vsapi->mapSetData(props, MVToolsAnalysisDataKey, reinterpret_cast<const char*>(&d->mvAnalysisData), sizeof(d->mvAnalysisData), dtBinary, maReplace);
+    vsapi->mapSetData(props, MVToolsVectorsKey, vectorBlob.data(), static_cast<int>(vectorBlob.size()), dtBinary, maReplace);
+
+    return true;
+}
+
 static const VSFrame* VS_CC rifeGetFrame(int n, int activationReason, void* instanceData, [[maybe_unused]] void** frameData,
                                          VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
     auto d{ static_cast<const RIFEData*>(instanceData) };
+
+    if (d->exportMotionVectors) {
+        if (activationReason == arInitial) {
+            vsapi->requestFrameFilter(n, d->node, frameCtx);
+            if (d->mvBackward) {
+                if (n + 1 < d->vi.numFrames)
+                    vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
+            } else if (n > 0) {
+                vsapi->requestFrameFilter(n - 1, d->node, frameCtx);
+            }
+        } else if (activationReason == arAllFramesReady) {
+            auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
+            const VSFrame* reference{};
+            if (d->mvBackward) {
+                if (n + 1 < d->vi.numFrames)
+                    reference = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
+            } else if (n > 0) {
+                reference = vsapi->getFrameFilter(n - 1, d->node, frameCtx);
+            }
+
+            auto dst = vsapi->copyFrame(current, core);
+            if (!attachMotionVectors(current, reference, dst, d, vsapi)) {
+                vsapi->freeFrame(current);
+                vsapi->freeFrame(reference);
+                vsapi->freeFrame(dst);
+                vsapi->setFilterError("RIFE: failed to export motion vectors", frameCtx);
+                return nullptr;
+            }
+
+            vsapi->freeFrame(current);
+            vsapi->freeFrame(reference);
+            return dst;
+        }
+
+        return nullptr;
+    }
 
     auto frameNum{ static_cast<int>(n * d->factorDen / d->factorNum) };
     auto remainder{ n * d->factorDen % d->factorNum };
@@ -196,6 +470,32 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
 
         auto tta{ !!vsapi->mapGetInt(in, "tta", 0, &err) };
         auto uhd{ !!vsapi->mapGetInt(in, "uhd", 0, &err) };
+        d->exportMotionVectors = !!vsapi->mapGetInt(in, "mv", 0, &err);
+        d->mvBackward = !!vsapi->mapGetInt(in, "mv_backward", 0, &err);
+        if (err)
+            d->mvBackward = true;
+        auto mvBlockSize{ vsapi->mapGetIntSaturated(in, "mv_block_size", 0, &err) };
+        if (err)
+            mvBlockSize = 16;
+        auto mvOverlap{ vsapi->mapGetIntSaturated(in, "mv_overlap", 0, &err) };
+        if (err)
+            mvOverlap = 0;
+        auto mvPel{ vsapi->mapGetIntSaturated(in, "mv_pel", 0, &err) };
+        if (err)
+            mvPel = 1;
+        auto mvBits{ vsapi->mapGetIntSaturated(in, "mv_bits", 0, &err) };
+        if (err)
+            mvBits = 8;
+        auto mvHPadding{ vsapi->mapGetIntSaturated(in, "mv_hpad", 0, &err) };
+        if (err)
+            mvHPadding = 0;
+        auto mvVPadding{ vsapi->mapGetIntSaturated(in, "mv_vpad", 0, &err) };
+        if (err)
+            mvVPadding = 0;
+        auto mvBlockReduce{ vsapi->mapGetIntSaturated(in, "mv_block_reduce", 0, &err) };
+        if (err)
+            mvBlockReduce = MVBlockReduceCenter;
+        d->mvUseChroma = !!vsapi->mapGetInt(in, "mv_chroma", 0, &err);
         d->sceneChange = !!vsapi->mapGetInt(in, "sc", 0, &err);
         d->skip = !!vsapi->mapGetInt(in, "skip", 0, &err);
 
@@ -228,7 +528,13 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (d->skipThreshold < 0 || d->skipThreshold > 60)
             throw "skip_threshold must be between 0.0 and 60.0 (inclusive)";
 
-        if (fpsNum && fpsDen) {
+        if (d->exportMotionVectors) {
+            if (fpsNum || fpsDen || factorNum != 2 || factorDen != 1)
+                throw "mv=True does not support factor_num, factor_den, fps_num, or fps_den";
+
+            d->factorNum = 1;
+            d->factorDen = 1;
+        } else if (fpsNum && fpsDen) {
             vsh::muldivRational(&fpsNum, &fpsDen, d->vi.fpsDen, d->vi.fpsNum);
             d->factorNum = fpsNum;
             d->factorDen = fpsDen;
@@ -545,11 +851,75 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         else if (modelPath.find("rife") == std::string::npos)
             throw "unknown model dir type";
 
-        if (!rife_v4 && (d->factorNum != 2 || d->factorDen != 1))
+        if (!d->exportMotionVectors && !rife_v4 && (d->factorNum != 2 || d->factorDen != 1))
             throw "only rife-v4 model supports custom frame rate";
 
         if (rife_v4 && tta)
             throw "rife-v4 model does not support TTA mode";
+
+        if (d->exportMotionVectors) {
+            if (tta)
+                throw "mv=True does not support TTA mode";
+
+            if (d->sceneChange || d->skip)
+                throw "mv=True does not support sc or skip";
+
+            if (modelPath.find("rife-v3.1") == std::string::npos)
+                throw "mv=True currently requires the rife-v3.1 model";
+
+            if (mvBlockSize < 1)
+                throw "mv_block_size must be at least 1";
+
+            if (mvOverlap < 0 || mvOverlap >= mvBlockSize)
+                throw "mv_overlap must be between 0 and mv_block_size - 1";
+
+            if (mvPel < 1)
+                throw "mv_pel must be at least 1";
+
+            if (mvBits < 1 || mvBits > 16)
+                throw "mv_bits must be between 1 and 16 (inclusive)";
+
+            if (mvHPadding < 0 || mvVPadding < 0)
+                throw "mv_hpad and mv_vpad must be non-negative";
+
+            if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
+                throw "mv_block_reduce must be 0 (center) or 1 (average)";
+
+            d->mvBlockSize = mvBlockSize;
+            d->mvOverlap = mvOverlap;
+            d->mvStepX = mvBlockSize - mvOverlap;
+            d->mvStepY = mvBlockSize - mvOverlap;
+            d->mvPel = mvPel;
+            d->mvBits = mvBits;
+            d->mvHPadding = mvHPadding;
+            d->mvVPadding = mvVPadding;
+            d->mvBlkX = computeBlockCount(d->vi.width, d->mvBlockSize, d->mvOverlap, d->mvHPadding);
+            d->mvBlkY = computeBlockCount(d->vi.height, d->mvBlockSize, d->mvOverlap, d->mvVPadding);
+            d->mvBlockReduce = mvBlockReduce;
+            d->mvInvalidSad = static_cast<int64_t>(d->mvBlockSize) * d->mvBlockSize * (1LL << d->mvBits);
+            d->mvAnalysisData = {};
+            d->mvAnalysisData.nVersion = 5;
+            d->mvAnalysisData.nBlkSizeX = d->mvBlockSize;
+            d->mvAnalysisData.nBlkSizeY = d->mvBlockSize;
+            d->mvAnalysisData.nPel = d->mvPel;
+            d->mvAnalysisData.nLvCount = 1;
+            d->mvAnalysisData.nDeltaFrame = 1;
+            d->mvAnalysisData.isBackward = d->mvBackward ? 1 : 0;
+            d->mvAnalysisData.nMotionFlags = d->mvBackward ? MotionIsBackward : 0;
+            if (d->mvUseChroma)
+                d->mvAnalysisData.nMotionFlags |= MotionUseChromaMotion;
+            d->mvAnalysisData.nWidth = d->vi.width;
+            d->mvAnalysisData.nHeight = d->vi.height;
+            d->mvAnalysisData.nOverlapX = d->mvOverlap;
+            d->mvAnalysisData.nOverlapY = d->mvOverlap;
+            d->mvAnalysisData.nBlkX = d->mvBlkX;
+            d->mvAnalysisData.nBlkY = d->mvBlkY;
+            d->mvAnalysisData.bitsPerSample = d->mvBits;
+            d->mvAnalysisData.yRatioUV = 1;
+            d->mvAnalysisData.xRatioUV = 1;
+            d->mvAnalysisData.nHPadding = d->mvHPadding;
+            d->mvAnalysisData.nVPadding = d->mvVPadding;
+        }
 
         d->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
 
@@ -678,6 +1048,16 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_thread:int:opt;"
                              "tta:int:opt;"
                              "uhd:int:opt;"
+                             "mv:int:opt;"
+                             "mv_backward:int:opt;"
+                             "mv_block_size:int:opt;"
+                             "mv_overlap:int:opt;"
+                             "mv_pel:int:opt;"
+                             "mv_bits:int:opt;"
+                             "mv_hpad:int:opt;"
+                             "mv_vpad:int:opt;"
+                             "mv_block_reduce:int:opt;"
+                             "mv_chroma:int:opt;"
                              "sc:int:opt;"
                              "skip:int:opt;"
                              "skip_threshold:float:opt;"
