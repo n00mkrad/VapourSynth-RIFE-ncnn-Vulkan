@@ -513,20 +513,50 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     cmd.record_clone(flow, flow_cpu, opt);
     cmd.submit_and_wait();
 
-    if (flow_cpu.c < 4)
+    ncnn::Mat flow_cpu_unpacked;
+    if (flow_cpu.elempack != 1)
+    {
+        ncnn::Layer* packing = ncnn::create_layer("Packing");
+        ncnn::ParamDict pd;
+        pd.set(0, 1);
+        packing->load_param(pd);
+
+        ncnn::Option unpack_opt = flownet.opt;
+        unpack_opt.blob_allocator = 0;
+        unpack_opt.workspace_allocator = 0;
+        unpack_opt.blob_vkallocator = 0;
+        unpack_opt.workspace_vkallocator = 0;
+        unpack_opt.staging_vkallocator = 0;
+
+        if (packing->forward(flow_cpu, flow_cpu_unpacked, unpack_opt) != 0)
+        {
+            delete packing;
+            vkdev->reclaim_blob_allocator(blob_vkallocator);
+            vkdev->reclaim_staging_allocator(staging_vkallocator);
+            return -1;
+        }
+
+        delete packing;
+    }
+    else
+    {
+        flow_cpu_unpacked = flow_cpu;
+    }
+
+    if (flow_cpu_unpacked.c < 4)
     {
         vkdev->reclaim_blob_allocator(blob_vkallocator);
         vkdev->reclaim_staging_allocator(staging_vkallocator);
         return -1;
     }
 
-    const auto flow_w = flow_cpu.w;
-    const auto flow_h = flow_cpu.h;
+    const auto flow_w = flow_cpu_unpacked.w;
+    const auto flow_h = flow_cpu_unpacked.h;
     const auto out_w = flow_w * 2;
     const auto out_h = flow_h * 2;
     for (auto c = 0; c < 4; c++)
     {
-        const auto src = static_cast<const float*>(flow_cpu.channel(c));
+        const auto src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
         auto dst = flow_out + static_cast<size_t>(c) * w * h;
         for (auto y = 0; y < h; y++)
         {
