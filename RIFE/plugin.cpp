@@ -93,6 +93,7 @@ struct MotionVectorConfig final {
     int stepX;
     int stepY;
     int pel;
+    int delta;
     int bits;
     int hPadding;
     int vPadding;
@@ -140,7 +141,7 @@ static int clampMotionVectorComponent(const int value, const int pel, const int 
 
 static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, const VSVideoInfo* const metadataVi,
                                                    const bool useChroma, const int blockSize, const int overlap,
-                                                   const int pel, const int bits, const int hPadding,
+                                                   const int pel, const int delta, const int bits, const int hPadding,
                                                    const int vPadding, const int blockReduce) noexcept {
     MotionVectorConfig config{};
     config.useChroma = useChroma;
@@ -149,6 +150,7 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
     config.stepX = blockSize - overlap;
     config.stepY = blockSize - overlap;
     config.pel = pel;
+    config.delta = delta;
     config.bits = bits;
     config.hPadding = hPadding;
     config.vPadding = vPadding;
@@ -167,7 +169,7 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
         analysisData.nBlkSizeY = config.blockSize;
         analysisData.nPel = config.pel;
         analysisData.nLvCount = 1;
-        analysisData.nDeltaFrame = 1;
+        analysisData.nDeltaFrame = config.delta;
         analysisData.isBackward = backward ? 1 : 0;
         analysisData.nMotionFlags = backward ? MotionIsBackward : 0;
         if (config.useChroma)
@@ -575,22 +577,23 @@ static const VSFrame* VS_CC rifeGetFrame(int n, int activationReason, void* inst
     auto d{ static_cast<const RIFEData*>(instanceData) };
 
     if (d->exportMotionVectors) {
+        const auto delta = d->mvConfig.delta;
         if (activationReason == arInitial) {
             vsapi->requestFrameFilter(n, d->node, frameCtx);
             if (d->mvBackward) {
-                if (n + 1 < d->vi.numFrames)
-                    vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
-            } else if (n > 0) {
-                vsapi->requestFrameFilter(n - 1, d->node, frameCtx);
+                if (n + delta < d->vi.numFrames)
+                    vsapi->requestFrameFilter(n + delta, d->node, frameCtx);
+            } else if (n >= delta) {
+                vsapi->requestFrameFilter(n - delta, d->node, frameCtx);
             }
         } else if (activationReason == arAllFramesReady) {
             auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
             const VSFrame* reference{};
             if (d->mvBackward) {
-                if (n + 1 < d->vi.numFrames)
-                    reference = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
-            } else if (n > 0) {
-                reference = vsapi->getFrameFilter(n - 1, d->node, frameCtx);
+                if (n + delta < d->vi.numFrames)
+                    reference = vsapi->getFrameFilter(n + delta, d->node, frameCtx);
+            } else if (n >= delta) {
+                reference = vsapi->getFrameFilter(n - delta, d->node, frameCtx);
             }
 
             auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, current, core);
@@ -677,14 +680,15 @@ static const VSFrame* VS_CC rifeGetFrame(int n, int activationReason, void* inst
 static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void* instanceData, [[maybe_unused]] void** frameData,
                                                VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
     auto d{ static_cast<const RIFEMVPairData*>(instanceData) };
+    const auto delta = d->mvConfig.delta;
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(n, d->node, frameCtx);
-        if (n + 1 < d->vi.numFrames)
-            vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
+        if (n + delta < d->vi.numFrames)
+            vsapi->requestFrameFilter(n + delta, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
         auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
-        const VSFrame* reference = n + 1 < d->vi.numFrames ? vsapi->getFrameFilter(n + 1, d->node, frameCtx) : nullptr;
+        const VSFrame* reference = n + delta < d->vi.numFrames ? vsapi->getFrameFilter(n + delta, d->node, frameCtx) : nullptr;
 
         auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, current, core);
         zeroMotionVectorFrame(dst, d->vi, vsapi);
@@ -736,7 +740,8 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
 static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, void* instanceData, [[maybe_unused]] void** frameData,
                                                  VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
     auto d{ static_cast<const RIFEMVOutputData*>(instanceData) };
-    const auto pairIndex = d->backward ? n : n - 1;
+    const auto delta = d->analysisData.nDeltaFrame;
+    const auto pairIndex = d->backward ? n : n - delta;
 
     if (activationReason == arInitial) {
         if (pairIndex >= 0 && pairIndex < d->vi.numFrames) {
@@ -875,6 +880,9 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         auto mvPel{ vsapi->mapGetIntSaturated(in, "mv_pel", 0, &err) };
         if (err)
             mvPel = 1;
+        auto mvDelta{ vsapi->mapGetIntSaturated(in, "mv_delta", 0, &err) };
+        if (err)
+            mvDelta = 1;
         auto mvBits{ vsapi->mapGetIntSaturated(in, "mv_bits", 0, &err) };
         const auto mvBitsSpecified = !err;
         if (err)
@@ -1285,6 +1293,9 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             if (mvPel < 1)
                 throw "mv_pel must be at least 1";
 
+            if (mvDelta < 1)
+                throw "mv_delta must be at least 1";
+
             if (mvBits < 1 || mvBits > 16)
                 throw "mv_bits must be between 1 and 16 (inclusive)";
 
@@ -1294,42 +1305,23 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
                 throw "mv_block_reduce must be 0 (center) or 1 (average)";
 
-            d->mvBlockSize = mvBlockSize;
-            d->mvOverlap = mvOverlap;
-            d->mvStepX = mvBlockSize - mvOverlap;
-            d->mvStepY = mvBlockSize - mvOverlap;
-            d->mvPel = mvPel;
-            d->mvBits = mvBits;
-            d->mvHPadding = mvHPadding;
-            d->mvVPadding = mvVPadding;
-            d->mvBlkX = computeBlockCount(d->vi.width, d->mvBlockSize, d->mvOverlap, d->mvHPadding);
-            d->mvBlkY = computeBlockCount(d->vi.height, d->mvBlockSize, d->mvOverlap, d->mvVPadding);
-            d->mvBlockReduce = mvBlockReduce;
-            d->mvInvalidSad = static_cast<int64_t>(d->mvBlockSize) * d->mvBlockSize * (1LL << d->mvBits);
-            const auto xRatioUV = hasMVClip ? 1 << mvClipVi.format.subSamplingW : 1 << d->vi.format.subSamplingW;
-            const auto yRatioUV = hasMVClip ? 1 << mvClipVi.format.subSamplingH : 1 << d->vi.format.subSamplingH;
-            d->mvAnalysisData = {};
-            d->mvAnalysisData.nVersion = 5;
-            d->mvAnalysisData.nBlkSizeX = d->mvBlockSize;
-            d->mvAnalysisData.nBlkSizeY = d->mvBlockSize;
-            d->mvAnalysisData.nPel = d->mvPel;
-            d->mvAnalysisData.nLvCount = 1;
-            d->mvAnalysisData.nDeltaFrame = 1;
-            d->mvAnalysisData.isBackward = d->mvBackward ? 1 : 0;
-            d->mvAnalysisData.nMotionFlags = d->mvBackward ? MotionIsBackward : 0;
-            if (d->mvUseChroma)
-                d->mvAnalysisData.nMotionFlags |= MotionUseChromaMotion;
-            d->mvAnalysisData.nWidth = d->vi.width;
-            d->mvAnalysisData.nHeight = d->vi.height;
-            d->mvAnalysisData.nOverlapX = d->mvOverlap;
-            d->mvAnalysisData.nOverlapY = d->mvOverlap;
-            d->mvAnalysisData.nBlkX = d->mvBlkX;
-            d->mvAnalysisData.nBlkY = d->mvBlkY;
-            d->mvAnalysisData.bitsPerSample = d->mvBits;
-            d->mvAnalysisData.yRatioUV = yRatioUV;
-            d->mvAnalysisData.xRatioUV = xRatioUV;
-            d->mvAnalysisData.nHPadding = d->mvHPadding;
-            d->mvAnalysisData.nVPadding = d->mvVPadding;
+            d->mvConfig = createMotionVectorConfig(d->vi, hasMVClip ? &mvClipVi : nullptr,
+                                                   d->mvUseChroma, mvBlockSize, mvOverlap,
+                                                   mvPel, mvDelta, mvBits, mvHPadding,
+                                                   mvVPadding, mvBlockReduce);
+            d->mvBlockSize = d->mvConfig.blockSize;
+            d->mvOverlap = d->mvConfig.overlap;
+            d->mvStepX = d->mvConfig.stepX;
+            d->mvStepY = d->mvConfig.stepY;
+            d->mvPel = d->mvConfig.pel;
+            d->mvBits = d->mvConfig.bits;
+            d->mvHPadding = d->mvConfig.hPadding;
+            d->mvVPadding = d->mvConfig.vPadding;
+            d->mvBlkX = d->mvConfig.blkX;
+            d->mvBlkY = d->mvConfig.blkY;
+            d->mvBlockReduce = d->mvConfig.blockReduce;
+            d->mvInvalidSad = d->mvConfig.invalidSad;
+            d->mvAnalysisData = d->mvBackward ? d->mvConfig.backwardAnalysisData : d->mvConfig.forwardAnalysisData;
 
             if (!vsapi->getVideoFormatByID(&d->vi.format, pfGray8, core))
                 throw "failed to create mv=True output format";
@@ -1500,6 +1492,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         auto mvPel{ vsapi->mapGetIntSaturated(in, "mv_pel", 0, &err) };
         if (err)
             mvPel = 1;
+        auto mvDelta{ vsapi->mapGetIntSaturated(in, "mv_delta", 0, &err) };
+        if (err)
+            mvDelta = 1;
         auto mvBits{ vsapi->mapGetIntSaturated(in, "mv_bits", 0, &err) };
         const auto mvBitsSpecified = !err;
         if (err)
@@ -1557,6 +1552,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (mvPel < 1)
             throw "mv_pel must be at least 1";
 
+        if (mvDelta < 1)
+            throw "mv_delta must be at least 1";
+
         if (mvBits < 1 || mvBits > 16)
             throw "mv_bits must be between 1 and 16 (inclusive)";
 
@@ -1567,7 +1565,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             throw "mv_block_reduce must be 0 (center) or 1 (average)";
 
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, hasMVClip ? &mvClipVi : nullptr,
-                                                      mvUseChroma, mvBlockSize, mvOverlap, mvPel,
+                                                      mvUseChroma, mvBlockSize, mvOverlap, mvPel, mvDelta,
                                                       mvBits, mvHPadding, mvVPadding, mvBlockReduce);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
@@ -1669,6 +1667,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "mv_block_size:int:opt;"
                              "mv_overlap:int:opt;"
                              "mv_pel:int:opt;"
+                             "mv_delta:int:opt;"
                              "mv_bits:int:opt;"
                              "mv_clip:vnode:opt;"
                              "mv_hpad:int:opt;"
@@ -1692,6 +1691,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "mv_block_size:int:opt;"
                              "mv_overlap:int:opt;"
                              "mv_pel:int:opt;"
+                             "mv_delta:int:opt;"
                              "mv_bits:int:opt;"
                              "mv_clip:vnode:opt;"
                              "mv_hpad:int:opt;"
