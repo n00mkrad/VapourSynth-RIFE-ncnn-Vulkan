@@ -11,7 +11,7 @@
 class RIFE
 {
 public:
-    RIFE(int gpuid, bool tta_mode = false, float flow_scale = 1.f, int num_threads = 1, bool rife_v2 = false, bool rife_v4 = false, int padding = 32);
+    RIFE(int gpuid, float flow_scale = 1.f, int num_threads = 1, bool rife_v2 = false, bool rife_v4 = false, int padding = 32);
     ~RIFE();
 
 #if _WIN32
@@ -41,16 +41,11 @@ private:
     ncnn::Net fusionnet;
     ncnn::Pipeline* rife_preproc;
     ncnn::Pipeline* rife_postproc;
-    ncnn::Pipeline* rife_flow_tta_avg;
-    ncnn::Pipeline* rife_flow_tta_temporal_avg;
-    ncnn::Pipeline* rife_out_tta_temporal_avg;
     ncnn::Pipeline* rife_v4_timestep;
     ncnn::Layer* rife_flow_scale_image;
     ncnn::Layer* rife_flow_resize_flow;
     ncnn::Layer* rife_flow_scale_vectors;
     ncnn::Layer* rife_v2_slice_flow;
-    bool tta_mode;
-    bool tta_temporal_mode;
     bool use_flow_scale;
     float flow_scale;
     float flow_scale_inv;

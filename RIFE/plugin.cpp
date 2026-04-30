@@ -1127,7 +1127,6 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (err)
             gpuThread = 2;
 
-        auto tta{ !!vsapi->mapGetInt(in, "tta", 0, &err) };
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
         if (err)
             flowScale = 1.f;
@@ -1241,13 +1240,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (!d->exportMotionVectors && !resolvedModel.rifeV4 && (d->factorNum != 2 || d->factorDen != 1))
             throw "only rife-v4 model supports custom frame rate";
 
-        if (resolvedModel.rifeV4 && tta)
-            throw "rife-v4 model does not support TTA mode";
-
         if (d->exportMotionVectors) {
-            if (tta)
-                throw "mv=True does not support TTA mode";
-
             if (d->sceneChange || d->skip)
                 throw "mv=True does not support sc or skip";
 
@@ -1383,7 +1376,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             vsapi->freeMap(ret);
         }
 
-        d->rife = std::make_unique<RIFE>(gpuId, tta, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        d->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
         loadRIFEModel(*d->rife, resolvedModel.modelPath);
     } catch (const char* error) {
         vsapi->mapSetError(out, ("RIFE: "s + error).c_str());
@@ -1845,7 +1838,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
-                             "tta:int:opt;"
                              "flow_scale:float:opt;"
                              "mv:int:opt;"
                              "mv_backward:int:opt;"
