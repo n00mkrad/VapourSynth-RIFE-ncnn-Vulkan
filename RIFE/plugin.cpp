@@ -1530,7 +1530,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         }
 
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
-        pairData->rife = std::make_unique<RIFE>(gpuId, false, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
     } catch (const char* error) {
         vsapi->mapSetError(out, ("RIFEMV: "s + error).c_str());
@@ -1732,7 +1732,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
         sourceNode = vsapi->addNodeRef(pairData->node);
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
-        pairData->rife = std::make_unique<RIFE>(gpuId, false, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
     } catch (const char* error) {
         vsapi->mapSetError(out, (std::string(functionName) + ": " + error).c_str());
