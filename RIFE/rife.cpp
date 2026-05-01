@@ -147,6 +147,50 @@ static std::string detect_v4_flow_blob_name(const ncnn::Net& flownet)
         return layer_idx >= 0 && layer_idx < static_cast<int>(layers.size()) && layers[layer_idx];
     };
 
+    auto resolve_flow_blob_from_warp_layer = [&](const int warp_layer_idx) {
+        if (!is_valid_layer(warp_layer_idx))
+            return -1;
+
+        const auto* const warp_layer = layers[warp_layer_idx];
+        if (warp_layer->type != "rife.Warp" || warp_layer->bottoms.size() < 2)
+            return -1;
+
+        const auto image_blob_idx = warp_layer->bottoms[0];
+        if (!is_valid_blob(image_blob_idx))
+            return -1;
+
+        const auto& image_blob_name = blobs[image_blob_idx].name;
+        if (!starts_with(image_blob_name, "in0") && !starts_with(image_blob_name, "in1"))
+            return -1;
+
+        const auto flow_slice_blob_idx = warp_layer->bottoms[1];
+        if (!is_valid_blob(flow_slice_blob_idx))
+            return -1;
+
+        const auto crop_layer_idx = blobs[flow_slice_blob_idx].producer;
+        if (!is_valid_layer(crop_layer_idx))
+            return -1;
+
+        const auto* const crop_layer = layers[crop_layer_idx];
+        if (crop_layer->type != "Crop" || crop_layer->bottoms.empty())
+            return -1;
+
+        const auto split_output_blob_idx = crop_layer->bottoms[0];
+        if (!is_valid_blob(split_output_blob_idx))
+            return -1;
+
+        const auto split_layer_idx = blobs[split_output_blob_idx].producer;
+        if (!is_valid_layer(split_layer_idx))
+            return -1;
+
+        const auto* const split_layer = layers[split_layer_idx];
+        if (split_layer->type != "Split" || split_layer->bottoms.empty())
+            return -1;
+
+        return split_layer->bottoms[0];
+    };
+
+    // Primary path: infer the flow blob from the two branches that feed out0.
     int out0_blob_idx = -1;
     for (int i = 0; i < static_cast<int>(blobs.size()); i++)
     {
@@ -156,17 +200,6 @@ static std::string detect_v4_flow_blob_name(const ncnn::Net& flownet)
             break;
         }
     }
-
-    if (out0_blob_idx < 0)
-        return {};
-
-    const auto final_layer_idx = blobs[out0_blob_idx].producer;
-    if (!is_valid_layer(final_layer_idx))
-        return {};
-
-    const auto* const final_layer = layers[final_layer_idx];
-    if (final_layer->bottoms.size() < 2)
-        return {};
 
     auto resolve_branch_flow_blob = [&](const int blend_branch_blob_idx) {
         if (!is_valid_blob(blend_branch_blob_idx))
@@ -183,66 +216,48 @@ static std::string detect_v4_flow_blob_name(const ncnn::Net& flownet)
                 continue;
 
             const auto warp_layer_idx = blobs[mul_input_blob_idx].producer;
-            if (!is_valid_layer(warp_layer_idx))
-                continue;
-
-            const auto* const warp_layer = layers[warp_layer_idx];
-            if (warp_layer->type != "rife.Warp" || warp_layer->bottoms.size() < 2)
-                continue;
-
-            const auto image_blob_idx = warp_layer->bottoms[0];
-            if (!is_valid_blob(image_blob_idx))
-                continue;
-
-            const auto& image_blob_name = blobs[image_blob_idx].name;
-            if (!starts_with(image_blob_name, "in0") && !starts_with(image_blob_name, "in1"))
-                continue;
-
-            const auto flow_slice_blob_idx = warp_layer->bottoms[1];
-            if (!is_valid_blob(flow_slice_blob_idx))
-                continue;
-
-            const auto crop_layer_idx = blobs[flow_slice_blob_idx].producer;
-            if (!is_valid_layer(crop_layer_idx))
-                continue;
-
-            const auto* const crop_layer = layers[crop_layer_idx];
-            if (crop_layer->type != "Crop" || crop_layer->bottoms.empty())
-                continue;
-
-            const auto split_output_blob_idx = crop_layer->bottoms[0];
-            if (!is_valid_blob(split_output_blob_idx))
-                continue;
-
-            const auto split_layer_idx = blobs[split_output_blob_idx].producer;
-            if (!is_valid_layer(split_layer_idx))
-                continue;
-
-            const auto* const split_layer = layers[split_layer_idx];
-            if (split_layer->type != "Split" || split_layer->bottoms.empty())
-                continue;
-
-            return split_layer->bottoms[0];
+            const auto flow_blob_idx = resolve_flow_blob_from_warp_layer(warp_layer_idx);
+            if (is_valid_blob(flow_blob_idx))
+                return flow_blob_idx;
         }
 
         return -1;
     };
 
-    const auto flow_blob_from_first_branch = resolve_branch_flow_blob(final_layer->bottoms[0]);
-    const auto flow_blob_from_second_branch = resolve_branch_flow_blob(final_layer->bottoms[1]);
-
-    if (is_valid_blob(flow_blob_from_first_branch) &&
-        is_valid_blob(flow_blob_from_second_branch) &&
-        flow_blob_from_first_branch == flow_blob_from_second_branch)
+    if (out0_blob_idx >= 0)
     {
-        return blobs[flow_blob_from_first_branch].name;
+        const auto final_layer_idx = blobs[out0_blob_idx].producer;
+        if (is_valid_layer(final_layer_idx))
+        {
+            const auto* const final_layer = layers[final_layer_idx];
+            if (final_layer->bottoms.size() >= 2)
+            {
+                const auto flow_blob_from_first_branch = resolve_branch_flow_blob(final_layer->bottoms[0]);
+                const auto flow_blob_from_second_branch = resolve_branch_flow_blob(final_layer->bottoms[1]);
+
+                if (is_valid_blob(flow_blob_from_first_branch) &&
+                    is_valid_blob(flow_blob_from_second_branch) &&
+                    flow_blob_from_first_branch == flow_blob_from_second_branch)
+                {
+                    return blobs[flow_blob_from_first_branch].name;
+                }
+
+                if (is_valid_blob(flow_blob_from_first_branch))
+                    return blobs[flow_blob_from_first_branch].name;
+
+                if (is_valid_blob(flow_blob_from_second_branch))
+                    return blobs[flow_blob_from_second_branch].name;
+            }
+        }
     }
 
-    if (is_valid_blob(flow_blob_from_first_branch))
-        return blobs[flow_blob_from_first_branch].name;
-
-    if (is_valid_blob(flow_blob_from_second_branch))
-        return blobs[flow_blob_from_second_branch].name;
+    // Fallback path for graphs where out0 is produced by a post-processed RGB head.
+    for (int layer_idx = static_cast<int>(layers.size()) - 1; layer_idx >= 0; layer_idx--)
+    {
+        const auto flow_blob_idx = resolve_flow_blob_from_warp_layer(layer_idx);
+        if (is_valid_blob(flow_blob_idx))
+            return blobs[flow_blob_idx].name;
+    }
 
     return {};
 }
