@@ -40,6 +40,7 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     rife_v2 = _rife_v2;
     rife_v4 = _rife_v4;
     padding = _padding;
+    rife_v4_flow_blob_name.clear();
 }
 
 RIFE::~RIFE()
@@ -126,6 +127,126 @@ static void load_param_model(ncnn::Net& net, const std::string& modeldir, const 
 }
 #endif
 
+static bool starts_with(const std::string& value, const char* prefix)
+{
+    const auto prefix_len = std::strlen(prefix);
+    return value.size() >= prefix_len && value.compare(0, prefix_len, prefix) == 0;
+}
+
+static std::string detect_v4_flow_blob_name(const ncnn::Net& flownet)
+{
+    const auto& blobs = flownet.blobs();
+    const auto& layers = flownet.layers();
+    if (blobs.empty() || layers.empty())
+        return {};
+
+    auto is_valid_blob = [&](const int blob_idx) {
+        return blob_idx >= 0 && blob_idx < static_cast<int>(blobs.size());
+    };
+    auto is_valid_layer = [&](const int layer_idx) {
+        return layer_idx >= 0 && layer_idx < static_cast<int>(layers.size()) && layers[layer_idx];
+    };
+
+    int out0_blob_idx = -1;
+    for (int i = 0; i < static_cast<int>(blobs.size()); i++)
+    {
+        if (blobs[i].name == "out0")
+        {
+            out0_blob_idx = i;
+            break;
+        }
+    }
+
+    if (out0_blob_idx < 0)
+        return {};
+
+    const auto final_layer_idx = blobs[out0_blob_idx].producer;
+    if (!is_valid_layer(final_layer_idx))
+        return {};
+
+    const auto* const final_layer = layers[final_layer_idx];
+    if (final_layer->bottoms.size() < 2)
+        return {};
+
+    auto resolve_branch_flow_blob = [&](const int blend_branch_blob_idx) {
+        if (!is_valid_blob(blend_branch_blob_idx))
+            return -1;
+
+        const auto mul_layer_idx = blobs[blend_branch_blob_idx].producer;
+        if (!is_valid_layer(mul_layer_idx))
+            return -1;
+
+        const auto* const mul_layer = layers[mul_layer_idx];
+        for (const auto mul_input_blob_idx : mul_layer->bottoms)
+        {
+            if (!is_valid_blob(mul_input_blob_idx))
+                continue;
+
+            const auto warp_layer_idx = blobs[mul_input_blob_idx].producer;
+            if (!is_valid_layer(warp_layer_idx))
+                continue;
+
+            const auto* const warp_layer = layers[warp_layer_idx];
+            if (warp_layer->type != "rife.Warp" || warp_layer->bottoms.size() < 2)
+                continue;
+
+            const auto image_blob_idx = warp_layer->bottoms[0];
+            if (!is_valid_blob(image_blob_idx))
+                continue;
+
+            const auto& image_blob_name = blobs[image_blob_idx].name;
+            if (!starts_with(image_blob_name, "in0") && !starts_with(image_blob_name, "in1"))
+                continue;
+
+            const auto flow_slice_blob_idx = warp_layer->bottoms[1];
+            if (!is_valid_blob(flow_slice_blob_idx))
+                continue;
+
+            const auto crop_layer_idx = blobs[flow_slice_blob_idx].producer;
+            if (!is_valid_layer(crop_layer_idx))
+                continue;
+
+            const auto* const crop_layer = layers[crop_layer_idx];
+            if (crop_layer->type != "Crop" || crop_layer->bottoms.empty())
+                continue;
+
+            const auto split_output_blob_idx = crop_layer->bottoms[0];
+            if (!is_valid_blob(split_output_blob_idx))
+                continue;
+
+            const auto split_layer_idx = blobs[split_output_blob_idx].producer;
+            if (!is_valid_layer(split_layer_idx))
+                continue;
+
+            const auto* const split_layer = layers[split_layer_idx];
+            if (split_layer->type != "Split" || split_layer->bottoms.empty())
+                continue;
+
+            return split_layer->bottoms[0];
+        }
+
+        return -1;
+    };
+
+    const auto flow_blob_from_first_branch = resolve_branch_flow_blob(final_layer->bottoms[0]);
+    const auto flow_blob_from_second_branch = resolve_branch_flow_blob(final_layer->bottoms[1]);
+
+    if (is_valid_blob(flow_blob_from_first_branch) &&
+        is_valid_blob(flow_blob_from_second_branch) &&
+        flow_blob_from_first_branch == flow_blob_from_second_branch)
+    {
+        return blobs[flow_blob_from_first_branch].name;
+    }
+
+    if (is_valid_blob(flow_blob_from_first_branch))
+        return blobs[flow_blob_from_first_branch].name;
+
+    if (is_valid_blob(flow_blob_from_second_branch))
+        return blobs[flow_blob_from_second_branch].name;
+
+    return {};
+}
+
 #if _WIN32
 int RIFE::load(const std::wstring& modeldir)
 #else
@@ -167,6 +288,9 @@ int RIFE::load(const std::string& modeldir)
         load_param_model(fusionnet, modeldir, "fusionnet");
     }
 #endif
+
+    if (rife_v4)
+        rife_v4_flow_blob_name = detect_v4_flow_blob_name(flownet);
 
     // initialize preprocess and postprocess pipeline
     if (vkdev)
@@ -494,8 +618,15 @@ static int copy_flow_output_resized_cpu(const ncnn::Mat& flow_cpu_unpacked, floa
     return 0;
 }
 
-static bool extract_v4_flow_blob(ncnn::Extractor& ex, ncnn::VkCompute& cmd, ncnn::VkMat& flow)
+static bool extract_v4_flow_blob(ncnn::Extractor& ex, ncnn::VkCompute& cmd, ncnn::VkMat& flow,
+                                 const std::string& preferred_flow_blob_name)
 {
+    if (!preferred_flow_blob_name.empty())
+    {
+        if (ex.extract(preferred_flow_blob_name.c_str(), flow, cmd) == 0 && !flow.empty())
+            return true;
+    }
+
     static constexpr std::array<const char*, 8> flow_blob_names{
         "/Add_4_output_0",
         "/Add_3_output_0",
@@ -626,7 +757,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             ex.input("in1", in1_gpu_padded);
             ex.input("in2", timestep_gpu_padded);
 
-            if (!extract_v4_flow_blob(ex, cmd, flow))
+            if (!extract_v4_flow_blob(ex, cmd, flow, rife_v4_flow_blob_name))
             {
                 vkdev->reclaim_blob_allocator(blob_vkallocator);
                 vkdev->reclaim_staging_allocator(staging_vkallocator);

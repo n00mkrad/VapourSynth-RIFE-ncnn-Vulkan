@@ -4,6 +4,7 @@
 #define RIFE_H
 
 #include <string>
+#include <vector>
 
 // ncnn
 #include "net.h"
@@ -63,6 +64,7 @@ private:
     bool rife_v2;
     bool rife_v4;
     int padding;
+    std::string rife_v4_flow_blob_name;
 };
 
 #endif // RIFE_H
