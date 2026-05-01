@@ -28,8 +28,9 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 
 - Motion-vector export supports `rife-v3.1`, `rife-v3.9`, and `rife-v4.2+` model families.
 - Legacy `rife-v4` as well as `rife-v4.0` and `rife-v4.1` are not supported for motion-vector export.
-- The analysis input to RIFE must still be constant-format `RGBS`.
-- MVTools usually operates on a different clip, often `YUV420P8`. When that is the case, pass `mv_clip=clip` so the exported MV metadata uses the correct bit depth and chroma subsampling.
+- Motion-vector APIs accept either constant-format `RGBS` or constant-format `YUV`. Non-`RGBS` `YUV` input is converted internally to `RGBS` for RIFE inference.
+- MVTools usually operates on a different clip, often `YUV420P8`. `mv_clip` is still optional and can be used explicitly as the metadata source.
+- If the input is non-`RGBS` and `mv_clip` is omitted, the plugin now uses the original input clip as the metadata source automatically.
 - Vector clips are dummy `Gray8` clips whose pixel values are not meaningful. The motion data lives in frame properties.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
@@ -40,7 +41,7 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 ### Signature
 
 ```python
-core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, flow_scale=1.0, cpu_flow_resize=None, mv=0, mv_backward=1, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0, sc=0, skip=0, skip_threshold=60.0)
+core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, flow_scale=1.0, cpu_flow_resize=None, mv=0, mv_backward=1, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, matrix_in_s="709", range_in_s="full", mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0, sc=0, skip=0, skip_threshold=60.0)
 ```
 
 ### New or changed arguments
@@ -88,6 +89,15 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
 - `mv_clip`
   Metadata-source clip for MVTools compatibility.
   This should usually be the actual clip you will feed to MVTools, for example the original `YUV420P8` source.
+  If omitted and `clip` is non-`RGBS`, the plugin uses the original input clip automatically.
+
+- `matrix_in_s`
+  Input matrix used when the MV API receives a non-`RGBS` `YUV` clip and performs internal conversion to `RGBS`.
+  Default: `"709"`.
+
+- `range_in_s`
+  Input range used for that same internal `YUV` -> `RGBS` conversion.
+  Default: `"full"`.
 
 - `mv_hpad`, `mv_vpad`
   Horizontal and vertical padding written into MV metadata and used for vector clamping.
@@ -105,9 +115,7 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
 ### Typical single-direction export
 
 ```python
-rife_in_clip = core.resize.Bicubic(clip, format=vs.RGBS, matrix_in_s="709", range_in_s="full")
-
-mvbw = core.rife.RIFE(rife_in_clip, model_path=rife_mdl, mv=1, mv_backward=1, mv_clip=clip)
+mvbw = core.rife.RIFE(clip, model_path=rife_mdl, mv=1, mv_backward=1, matrix_in_s="709", range_in_s="full")
 ```
 
 Use this mode when a function expects only one vector clip.
@@ -119,7 +127,7 @@ Use this mode when a function expects only one vector clip.
 ### Signature
 
 ```python
-mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, flow_scale=1.0, cpu_flow_resize=None, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0)
+mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, flow_scale=1.0, cpu_flow_resize=None, perf_stats=False, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, matrix_in_s="709", range_in_s="full", mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0)
 ```
 
 ### Return value
@@ -138,12 +146,12 @@ mvbw, mvfw = core.rife.RIFEMV(...)
 - `0`/`False` = force GPU resize
 - `1`/`True` = force CPU resize
 
+`perf_stats` enables per-filter performance timing. When enabled, a summary is printed to `stderr` when the filter instance is freed (end of clip processing).
+
 ### Recommended usage
 
 ```python
-rife_in_clip = core.resize.Bicubic(clip, format=vs.RGBS, matrix_in_s="709", range_in_s="full")
-
-mvbw, mvfw = core.rife.RIFEMV(rife_in_clip, model_path=rife_mdl, mv_clip=clip)
+mvbw, mvfw = core.rife.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 
 mask = core.mv.Mask(clip, mvfw, kind=5, ml=100.0)
 ```
@@ -151,10 +159,8 @@ mask = core.mv.Mask(clip, mvfw, kind=5, ml=100.0)
 ### Example with Degrain1
 
 ```python
-rife_in_clip = core.resize.Bicubic(clip, format=vs.RGBS, matrix_in_s="709", range_in_s="full")
-
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
-mvbw, mvfw = core.rife.RIFEMV(rife_in_clip, model_path=rife_mdl, mv_clip=clip, mv_pel=1, mv_hpad=0, mv_vpad=0)
+mvbw, mvfw = core.rife.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full", mv_pel=1, mv_hpad=0, mv_vpad=0)
 
 den = core.mv.Degrain1(clip, sup, mvbw, mvfw, thsad=500)
 ```
@@ -170,7 +176,7 @@ They are useful when you want delta-2 or delta-3 vectors without running separat
 ### `RIFEMVApprox2`
 
 ```python
-outputs = core.rife.RIFEMVApprox2(rife_in_clip, model_path=rife_mdl, mv_clip=clip)
+outputs = core.rife.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 ```
 
 Output order:
@@ -185,7 +191,7 @@ bw1, fw1, bw2, fw2 = core.rife.RIFEMVApprox2(...)
 ### `RIFEMVApprox3`
 
 ```python
-outputs = core.rife.RIFEMVApprox3(rife_in_clip, model_path=rife_mdl, mv_clip=clip)
+outputs = core.rife.RIFEMVApprox3(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 ```
 
 Output order:
@@ -205,10 +211,8 @@ bw1, fw1, bw2, fw2, bw3, fw3 = core.rife.RIFEMVApprox3(...)
 ### Example with Degrain2
 
 ```python
-rife_in_clip = core.resize.Bicubic(clip, format=vs.RGBS, matrix_in_s="709", range_in_s="full")
-
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
-bw1, fw1, bw2, fw2 = core.rife.RIFEMVApprox2(rife_in_clip, model_path=rife_mdl, mv_clip=clip)
+bw1, fw1, bw2, fw2 = core.rife.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 
 den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 ```
@@ -216,7 +220,8 @@ den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 ## Practical notes
 
 - Use `mv_block_reduce=1` as the default starting point for degraining.
-- Use `mv_clip=clip` whenever the RIFE analysis clip is RGBS but the MVTools consumer clip is YUV.
+- You can pass YUV clips directly; internal conversion to RGBS is done automatically for MV inference.
+- `mv_clip` is optional. For non-`RGBS` input it is auto-inferred from the original input clip when omitted; pass `mv_clip` explicitly only if you want a different metadata source.
 - Keep `mv_pel`, `mv_hpad`, and `mv_vpad` consistent with the `mv.Super` clip you use downstream.
 - If a function only needs one direction, `rife.RIFE(..., mv=1)` is enough.
 - If you need both directions for delta 1, prefer `rife.RIFEMV(...)`.
@@ -228,7 +233,7 @@ This modification turns RIFE into both an interpolator and a motion-vector sourc
 
 The key idea is:
 
-- RIFE still runs on `RGBS`
+- RIFE still runs on `RGBS` internally (with optional automatic YUV -> RGBS conversion in MV APIs)
 - MVTools still consumes its own vector-clip format
 - this build bridges the two by exporting MVTools-compatible binary vector properties
 

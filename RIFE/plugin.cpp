@@ -24,11 +24,14 @@
 
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <semaphore>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -42,6 +45,20 @@ using namespace std::literals;
 static std::atomic<int> numGPUInstances{ 0 };
 
 struct RIFEData;
+
+struct MotionVectorPerfStats final {
+    std::atomic<int64_t> pairFrames{ 0 };
+    std::atomic<int64_t> outputFrames{ 0 };
+    std::atomic<int64_t> flowCalls{ 0 };
+    std::atomic<int64_t> pairTotalNs{ 0 };
+    std::atomic<int64_t> outputTotalNs{ 0 };
+    std::atomic<int64_t> semaphoreWaitNs{ 0 };
+    std::atomic<int64_t> processFlowNs{ 0 };
+    std::atomic<int64_t> lumaBuildNs{ 0 };
+    std::atomic<int64_t> vectorPackNs{ 0 };
+    std::atomic<int64_t> displacementBuildNs{ 0 };
+    std::atomic<int64_t> composeNs{ 0 };
+};
 
 namespace {
 
@@ -122,6 +139,51 @@ constexpr auto RIFEMVUnsupportedEarlyV4Error =
 static_assert(sizeof(MVArraySizeType) == 4);
 static_assert(sizeof(MVToolsVector) == 16);
 static_assert(sizeof(MVAnalysisData) == 84);
+
+static int64_t monotonicNowNs() noexcept {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+static void accumulatePerfStat(std::atomic<int64_t>& stat, const int64_t value) noexcept {
+    stat.fetch_add(value, std::memory_order_relaxed);
+}
+
+static double nsToMs(const int64_t ns) noexcept {
+    return static_cast<double>(ns) / 1'000'000.0;
+}
+
+static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, const std::string& label) {
+    const auto pairFrames = stats.pairFrames.load(std::memory_order_relaxed);
+    const auto outputFrames = stats.outputFrames.load(std::memory_order_relaxed);
+    const auto flowCalls = stats.flowCalls.load(std::memory_order_relaxed);
+    const auto pairTotalNs = stats.pairTotalNs.load(std::memory_order_relaxed);
+    const auto outputTotalNs = stats.outputTotalNs.load(std::memory_order_relaxed);
+    const auto semaphoreWaitNs = stats.semaphoreWaitNs.load(std::memory_order_relaxed);
+    const auto processFlowNs = stats.processFlowNs.load(std::memory_order_relaxed);
+    const auto lumaBuildNs = stats.lumaBuildNs.load(std::memory_order_relaxed);
+    const auto vectorPackNs = stats.vectorPackNs.load(std::memory_order_relaxed);
+    const auto displacementBuildNs = stats.displacementBuildNs.load(std::memory_order_relaxed);
+    const auto composeNs = stats.composeNs.load(std::memory_order_relaxed);
+
+    std::cerr << std::fixed << std::setprecision(3);
+    std::cerr << "[rife] perf_stats summary (" << label << ")\n";
+    std::cerr << "  pair_frames=" << pairFrames
+              << " pair_total_ms=" << nsToMs(pairTotalNs)
+              << " pair_avg_ms=" << (pairFrames > 0 ? nsToMs(pairTotalNs) / pairFrames : 0.0) << '\n';
+    std::cerr << "  output_frames=" << outputFrames
+              << " output_total_ms=" << nsToMs(outputTotalNs)
+              << " output_avg_ms=" << (outputFrames > 0 ? nsToMs(outputTotalNs) / outputFrames : 0.0) << '\n';
+    std::cerr << "  flow_calls=" << flowCalls
+              << " process_flow_ms=" << nsToMs(processFlowNs)
+              << " process_flow_avg_ms=" << (flowCalls > 0 ? nsToMs(processFlowNs) / flowCalls : 0.0) << '\n';
+    std::cerr << "  semaphore_wait_ms=" << nsToMs(semaphoreWaitNs)
+              << " luma_build_ms=" << nsToMs(lumaBuildNs)
+              << " vector_pack_ms=" << nsToMs(vectorPackNs)
+              << " displacement_build_ms=" << nsToMs(displacementBuildNs)
+              << " compose_ms=" << nsToMs(composeNs) << std::endl;
+}
 
 static int computeBlockCount(const int size, const int blockSize, const int overlap, const int padding) noexcept {
     const auto step = blockSize - overlap;
@@ -307,6 +369,75 @@ static void loadRIFEModel(RIFE& rife, const std::string& modelPath) {
 #endif
 }
 
+struct MotionVectorInferenceClip final {
+    VSNode* node;
+    VSVideoInfo vi;
+    bool convertedFromYUV;
+};
+
+static bool isRGBSVideoFormat(const VSVideoInfo& vi) noexcept {
+    return vsh::isConstantVideoFormat(&vi) &&
+           vi.format.colorFamily == cfRGB &&
+           vi.format.sampleType == stFloat &&
+           vi.format.bitsPerSample == 32;
+}
+
+static MotionVectorInferenceClip buildMotionVectorInferenceClip(const VSMap* in, VSNode* sourceNode,
+                                                                const VSVideoInfo& sourceVi,
+                                                                VSCore* core, const VSAPI* vsapi) {
+    if (!vsh::isConstantVideoFormat(&sourceVi))
+        throw "clip must have a constant format";
+
+    if (isRGBSVideoFormat(sourceVi))
+        return { vsapi->addNodeRef(sourceNode), sourceVi, false };
+
+    if (sourceVi.format.colorFamily != cfYUV)
+        throw "motion-vector APIs require a constant RGBS clip or a constant YUV clip";
+
+    auto resizePlugin = vsapi->getPluginByID(VSH_RESIZE_PLUGIN_ID, core);
+    if (!resizePlugin)
+        throw "resize plugin is required for internal YUV->RGBS conversion";
+
+    int err{};
+    const auto matrixInValue = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
+    const auto* matrixIn = err ? "709" : matrixInValue;
+    const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
+    const auto* rangeIn = err ? "full" : rangeInValue;
+
+    auto args = vsapi->createMap();
+    vsapi->mapSetNode(args, "clip", sourceNode, maReplace);
+    vsapi->mapSetInt(args, "format", pfRGBS, maReplace);
+    vsapi->mapSetData(args, "matrix_in_s", matrixIn, -1, dtUtf8, maReplace);
+    vsapi->mapSetData(args, "range_in_s", rangeIn, -1, dtUtf8, maReplace);
+
+    auto ret = vsapi->invoke(resizePlugin, "Bicubic", args);
+    if (const auto* invokeError = vsapi->mapGetError(ret)) {
+        const auto errorMessage = std::string("failed to convert clip to RGBS: ") + invokeError;
+        vsapi->freeMap(args);
+        vsapi->freeMap(ret);
+        throw std::runtime_error(errorMessage);
+    }
+
+    auto rgbNode = vsapi->mapGetNode(ret, "clip", 0, &err);
+    if (err || !rgbNode) {
+        vsapi->freeMap(args);
+        vsapi->freeMap(ret);
+        throw "resize.Bicubic did not return a clip";
+    }
+
+    const auto rgbVi = *vsapi->getVideoInfo(rgbNode);
+    if (!isRGBSVideoFormat(rgbVi)) {
+        vsapi->freeNode(rgbNode);
+        vsapi->freeMap(args);
+        vsapi->freeMap(ret);
+        throw "internal YUV->RGBS conversion did not produce a constant RGBS clip";
+    }
+
+    vsapi->freeMap(args);
+    vsapi->freeMap(ret);
+    return { rgbNode, rgbVi, true };
+}
+
 } // namespace
 
 struct RIFEData final {
@@ -346,6 +477,9 @@ struct RIFEMVPairData final {
     MotionVectorConfig mvConfig;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
+    bool perfStats;
+    std::shared_ptr<MotionVectorPerfStats> perf;
+    std::string perfLabel;
 };
 
 struct RIFEMVOutputData final {
@@ -354,6 +488,8 @@ struct RIFEMVOutputData final {
     MVAnalysisData analysisData;
     std::vector<char> invalidBlob;
     bool backward;
+    bool perfStats;
+    std::shared_ptr<MotionVectorPerfStats> perf;
 };
 
 struct RIFEMVApproxPairData final {
@@ -362,6 +498,9 @@ struct RIFEMVApproxPairData final {
     MotionVectorConfig mvConfig;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
+    bool perfStats;
+    std::shared_ptr<MotionVectorPerfStats> perf;
+    std::string perfLabel;
 };
 
 struct RIFEMVApproxOutputData final {
@@ -372,6 +511,8 @@ struct RIFEMVApproxOutputData final {
     MVAnalysisData analysisData;
     std::vector<char> invalidBlob;
     bool backward;
+    bool perfStats;
+    std::shared_ptr<MotionVectorPerfStats> perf;
 };
 
 static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
@@ -957,6 +1098,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
         if (n + delta < d->vi.numFrames)
             vsapi->requestFrameFilter(n + delta, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
+        const auto pairStartNs = d->perfStats ? monotonicNowNs() : 0;
         auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
         const VSFrame* reference = n + delta < d->vi.numFrames ? vsapi->getFrameFilter(n + delta, d->node, frameCtx) : nullptr;
 
@@ -980,9 +1122,17 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
             const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
 
+            const auto semaphoreWaitStartNs = d->perfStats ? monotonicNowNs() : 0;
             d->semaphore->acquire();
+            if (d->perfStats)
+                accumulatePerfStat(d->perf->semaphoreWaitNs, monotonicNowNs() - semaphoreWaitStartNs);
+            const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
             const auto status = d->rife->process_flow(currentR, currentG, currentB, referenceR, referenceG, referenceB, flow.data(), width, height, stride);
             d->semaphore->release();
+            if (d->perfStats) {
+                accumulatePerfStat(d->perf->flowCalls, 1);
+                accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
+            }
             if (status != 0) {
                 vsapi->freeFrame(current);
                 vsapi->freeFrame(reference);
@@ -992,16 +1142,22 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             }
 
             if (!d->mvConfig.useChroma) {
+                const auto lumaStartNs = d->perfStats ? monotonicNowNs() : 0;
                 buildFrameLumaPlane(current, width, height, stride, currentLuma, vsapi);
                 buildFrameLumaPlane(reference, width, height, stride, referenceLuma, vsapi);
+                if (d->perfStats)
+                    accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
+            const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
             backwardBlob = buildMotionVectorBlobFromConfig(current, reference, flow.data(), true, d->mvConfig, true, vsapi,
                                                            currentLuma.empty() ? nullptr : &currentLuma,
                                                            referenceLuma.empty() ? nullptr : &referenceLuma);
             forwardBlob = buildMotionVectorBlobFromConfig(reference, current, flow.data(), true, d->mvConfig, false, vsapi,
                                                           referenceLuma.empty() ? nullptr : &referenceLuma,
                                                           currentLuma.empty() ? nullptr : &currentLuma);
+            if (d->perfStats)
+                accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
         } else {
             backwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, true);
             forwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, false);
@@ -1012,6 +1168,10 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
 
         vsapi->freeFrame(current);
         vsapi->freeFrame(reference);
+        if (d->perfStats) {
+            accumulatePerfStat(d->perf->pairFrames, 1);
+            accumulatePerfStat(d->perf->pairTotalNs, monotonicNowNs() - pairStartNs);
+        }
         return dst;
     }
 
@@ -1036,6 +1196,7 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
             return dst;
         }
     } else if (activationReason == arAllFramesReady) {
+        const auto outputStartNs = d->perfStats ? monotonicNowNs() : 0;
         const VSFrame* pairFrame{};
         if (pairIndex >= 0 && pairIndex < d->vi.numFrames)
             pairFrame = vsapi->getFrameFilter(pairIndex, d->node, frameCtx);
@@ -1063,6 +1224,10 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
         vsapi->mapSetData(props, MVToolsVectorsKey, vectorBlob, vectorBlobSize, dtBinary, maReplace);
 
         vsapi->freeFrame(pairFrame);
+        if (d->perfStats) {
+            accumulatePerfStat(d->perf->outputFrames, 1);
+            accumulatePerfStat(d->perf->outputTotalNs, monotonicNowNs() - outputStartNs);
+        }
         return dst;
     }
 
@@ -1079,6 +1244,7 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
         if (n + 1 < d->vi.numFrames)
             vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
+        const auto pairStartNs = d->perfStats ? monotonicNowNs() : 0;
         auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
         const VSFrame* reference = n + 1 < d->vi.numFrames ? vsapi->getFrameFilter(n + 1, d->node, frameCtx) : nullptr;
 
@@ -1106,10 +1272,18 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
             const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
 
+            const auto semaphoreWaitStartNs = d->perfStats ? monotonicNowNs() : 0;
             d->semaphore->acquire();
+            if (d->perfStats)
+                accumulatePerfStat(d->perf->semaphoreWaitNs, monotonicNowNs() - semaphoreWaitStartNs);
+            const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
             const auto status = d->rife->process_flow(currentR, currentG, currentB, referenceR, referenceG, referenceB,
                                                       flow.data(), width, height, stride);
             d->semaphore->release();
+            if (d->perfStats) {
+                accumulatePerfStat(d->perf->flowCalls, 1);
+                accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
+            }
             if (status != 0) {
                 vsapi->freeFrame(current);
                 vsapi->freeFrame(reference);
@@ -1119,18 +1293,27 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             }
 
             if (!d->mvConfig.useChroma) {
+                const auto lumaStartNs = d->perfStats ? monotonicNowNs() : 0;
                 buildFrameLumaPlane(current, width, height, stride, currentLuma, vsapi);
                 buildFrameLumaPlane(reference, width, height, stride, referenceLuma, vsapi);
+                if (d->perfStats)
+                    accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
+            const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
             backwardBlob = buildMotionVectorBlobFromConfig(current, reference, flow.data(), true, d->mvConfig, true, vsapi,
                                                            currentLuma.empty() ? nullptr : &currentLuma,
                                                            referenceLuma.empty() ? nullptr : &referenceLuma);
             forwardBlob = buildMotionVectorBlobFromConfig(reference, current, flow.data(), true, d->mvConfig, false, vsapi,
                                                           referenceLuma.empty() ? nullptr : &referenceLuma,
                                                           currentLuma.empty() ? nullptr : &currentLuma);
+            if (d->perfStats)
+                accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
+            const auto displacementBuildStartNs = d->perfStats ? monotonicNowNs() : 0;
             backwardDisplacement = buildDisplacementFromFlow(flow.data(), width, height, 0);
             forwardDisplacement = buildDisplacementFromFlow(flow.data(), width, height, 2);
+            if (d->perfStats)
+                accumulatePerfStat(d->perf->displacementBuildNs, monotonicNowNs() - displacementBuildStartNs);
         } else {
             backwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, true);
             forwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, false);
@@ -1149,6 +1332,10 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
 
         vsapi->freeFrame(current);
         vsapi->freeFrame(reference);
+        if (d->perfStats) {
+            accumulatePerfStat(d->perf->pairFrames, 1);
+            accumulatePerfStat(d->perf->pairTotalNs, monotonicNowNs() - pairStartNs);
+        }
         return dst;
     }
 
@@ -1179,8 +1366,15 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
             vsapi->requestFrameFilter(d->backward ? n + delta : n - delta, d->sourceNode, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
-        if (!valid)
-            return createInvalidFrame();
+        const auto outputStartNs = d->perfStats ? monotonicNowNs() : 0;
+        if (!valid) {
+            auto dst = createInvalidFrame();
+            if (d->perfStats) {
+                accumulatePerfStat(d->perf->outputFrames, 1);
+                accumulatePerfStat(d->perf->outputTotalNs, monotonicNowNs() - outputStartNs);
+            }
+            return dst;
+        }
 
         std::vector<const VSFrame*> pairFrames(delta);
         const VSFrame* current{};
@@ -1215,6 +1409,10 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
 
             auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, core, vsapi);
             cleanup();
+            if (d->perfStats) {
+                accumulatePerfStat(d->perf->outputFrames, 1);
+                accumulatePerfStat(d->perf->outputTotalNs, monotonicNowNs() - outputStartNs);
+            }
             return dst;
         }
 
@@ -1237,13 +1435,23 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
 
         std::vector<float> composedX;
         std::vector<float> composedY;
+        const auto composeStartNs = d->perfStats ? monotonicNowNs() : 0;
         composeDisplacementSequence(displacementXs, displacementYs, width, height, composedX, composedY);
+        if (d->perfStats)
+            accumulatePerfStat(d->perf->composeNs, monotonicNowNs() - composeStartNs);
+        const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
         const auto vectorBlob = buildMotionVectorBlobFromDisplacement(current, reference,
                                                                       composedX.data(), composedY.data(), true,
                                                                       d->mvConfig, d->backward, vsapi);
+        if (d->perfStats)
+            accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
 
         auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob.data(), static_cast<int>(vectorBlob.size()), core, vsapi);
         cleanup();
+        if (d->perfStats) {
+            accumulatePerfStat(d->perf->outputFrames, 1);
+            accumulatePerfStat(d->perf->outputTotalNs, monotonicNowNs() - outputStartNs);
+        }
         return dst;
     }
 
@@ -1252,6 +1460,8 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
 
 static void VS_CC rifeMVApproxPairFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
     auto d{ static_cast<RIFEMVApproxPairData*>(instanceData) };
+    if (d->perfStats && d->perf)
+        printMotionVectorPerfSummary(*d->perf, d->perfLabel);
     vsapi->freeNode(d->node);
     delete d;
 
@@ -1268,6 +1478,8 @@ static void VS_CC rifeMVApproxOutputFree(void* instanceData, [[maybe_unused]] VS
 
 static void VS_CC rifeMVPairFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
     auto d{ static_cast<RIFEMVPairData*>(instanceData) };
+    if (d->perfStats && d->perf)
+        printMotionVectorPerfSummary(*d->perf, d->perfLabel);
     vsapi->freeNode(d->node);
     delete d;
 
@@ -1294,23 +1506,32 @@ static void VS_CC rifeFree(void* instanceData, [[maybe_unused]] VSCore* core, co
 static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
     auto d{ std::make_unique<RIFEData>() };
     VSNode* mvClip{};
+    bool hasGPUInstance{};
 
     try {
         d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
         d->vi = *vsapi->getVideoInfo(d->node);
+        const auto sourceVi = d->vi;
+        bool sourceConverted{};
         VSVideoInfo mvClipVi{};
         bool hasMVClip{};
         int err;
+        d->exportMotionVectors = !!vsapi->mapGetInt(in, "mv", 0, &err);
 
-        if (!vsh::isConstantVideoFormat(&d->vi) ||
-            d->vi.format.colorFamily != cfRGB ||
-            d->vi.format.sampleType != stFloat ||
-            d->vi.format.bitsPerSample != 32)
+        if (d->exportMotionVectors) {
+            const auto inferenceInput = buildMotionVectorInferenceClip(in, d->node, sourceVi, core, vsapi);
+            vsapi->freeNode(d->node);
+            d->node = inferenceInput.node;
+            d->vi = inferenceInput.vi;
+            sourceConverted = inferenceInput.convertedFromYUV;
+        } else if (!isRGBSVideoFormat(d->vi)) {
             throw "only constant RGB format 32 bit float input supported";
+        }
 
         if (ncnn::create_gpu_instance())
             throw "failed to create GPU instance";
         ++numGPUInstances;
+        hasGPUInstance = true;
 
         auto factorNum{ vsapi->mapGetInt(in, "factor_num", 0, &err) };
         if (err)
@@ -1346,7 +1567,6 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         const auto cpuFlowResize{ vsapi->mapGetIntSaturated(in, "cpu_flow_resize", 0, &err) };
         if (!err)
             flowResizeMode = cpuFlowResize ? FlowResizeMode::ForceCPU : FlowResizeMode::ForceGPU;
-        d->exportMotionVectors = !!vsapi->mapGetInt(in, "mv", 0, &err);
         d->mvBackward = !!vsapi->mapGetInt(in, "mv_backward", 0, &err);
         if (err)
             d->mvBackward = true;
@@ -1398,11 +1618,13 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             if (!vsh::isConstantVideoFormat(&mvClipVi))
                 throw "mv_clip must have a constant format";
 
-            if (mvClipVi.width != d->vi.width || mvClipVi.height != d->vi.height)
+            if (mvClipVi.width != sourceVi.width || mvClipVi.height != sourceVi.height)
                 throw "mv_clip dimensions must match clip";
 
             if (!mvBitsSpecified)
                 mvBits = mvClipVi.format.bitsPerSample;
+        } else if (!mvBitsSpecified && sourceConverted) {
+            mvBits = sourceVi.format.bitsPerSample;
         }
 
         if (fpsNum && fpsDen && !(d->vi.fpsNum && d->vi.fpsDen))
@@ -1486,7 +1708,8 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
                 throw "mv_block_reduce must be 0 (center) or 1 (average)";
 
-            d->mvConfig = createMotionVectorConfig(d->vi, hasMVClip ? &mvClipVi : nullptr,
+            const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
+            d->mvConfig = createMotionVectorConfig(d->vi, metadataVi,
                                                    d->mvUseChroma, mvBlockSize, mvOverlap,
                                                    mvPel, mvDelta, mvBits, mvHPadding,
                                                    mvVPadding, mvBlockReduce);
@@ -1596,13 +1819,22 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
 
         d->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding, flowResizeMode);
         loadRIFEModel(*d->rife, resolvedModel.modelPath);
+    } catch (const std::exception& error) {
+        vsapi->mapSetError(out, ("RIFE: "s + error.what()).c_str());
+        vsapi->freeNode(d->node);
+        vsapi->freeNode(d->psnr);
+        vsapi->freeNode(mvClip);
+
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
+        return;
     } catch (const char* error) {
         vsapi->mapSetError(out, ("RIFE: "s + error).c_str());
         vsapi->freeNode(d->node);
         vsapi->freeNode(d->psnr);
         vsapi->freeNode(mvClip);
 
-        if (--numGPUInstances == 0)
+        if (hasGPUInstance && --numGPUInstances == 0)
             ncnn::destroy_gpu_instance();
         return;
     }
@@ -1625,15 +1857,17 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
         pairData->vi = *vsapi->getVideoInfo(pairData->node);
+        const auto sourceVi = pairData->vi;
+        bool sourceConverted{};
         VSVideoInfo mvClipVi{};
         bool hasMVClip{};
         int err;
 
-        if (!vsh::isConstantVideoFormat(&pairData->vi) ||
-            pairData->vi.format.colorFamily != cfRGB ||
-            pairData->vi.format.sampleType != stFloat ||
-            pairData->vi.format.bitsPerSample != 32)
-            throw "only constant RGB format 32 bit float input supported";
+        const auto inferenceInput = buildMotionVectorInferenceClip(in, pairData->node, sourceVi, core, vsapi);
+        vsapi->freeNode(pairData->node);
+        pairData->node = inferenceInput.node;
+        pairData->vi = inferenceInput.vi;
+        sourceConverted = inferenceInput.convertedFromYUV;
 
         if (ncnn::create_gpu_instance())
             throw "failed to create GPU instance";
@@ -1658,6 +1892,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto cpuFlowResize{ vsapi->mapGetIntSaturated(in, "cpu_flow_resize", 0, &err) };
         if (!err)
             flowResizeMode = cpuFlowResize ? FlowResizeMode::ForceCPU : FlowResizeMode::ForceGPU;
+        const auto perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
         auto mvBlockSize{ vsapi->mapGetIntSaturated(in, "mv_block_size", 0, &err) };
         if (err)
             mvBlockSize = 16;
@@ -1695,11 +1930,13 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             if (!vsh::isConstantVideoFormat(&mvClipVi))
                 throw "mv_clip must have a constant format";
 
-            if (mvClipVi.width != pairData->vi.width || mvClipVi.height != pairData->vi.height)
+            if (mvClipVi.width != sourceVi.width || mvClipVi.height != sourceVi.height)
                 throw "mv_clip dimensions must match clip";
 
             if (!mvBitsSpecified)
                 mvBits = mvClipVi.format.bitsPerSample;
+        } else if (!mvBitsSpecified && sourceConverted) {
+            mvBits = sourceVi.format.bitsPerSample;
         }
 
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
@@ -1741,7 +1978,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
             throw "mv_block_reduce must be 0 (center) or 1 (average)";
 
-        pairData->mvConfig = createMotionVectorConfig(pairData->vi, hasMVClip ? &mvClipVi : nullptr,
+        const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
+        pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi,
                                                       mvUseChroma, mvBlockSize, mvOverlap, mvPel, mvDelta,
                                                       mvBits, mvHPadding, mvVPadding, mvBlockReduce);
 
@@ -1754,8 +1992,21 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         }
 
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        pairData->perfStats = perfStats;
+        if (pairData->perfStats) {
+            pairData->perf = std::make_shared<MotionVectorPerfStats>();
+            pairData->perfLabel = "RIFEMV(delta=" + std::to_string(pairData->mvConfig.delta) + ")";
+        }
         pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding, flowResizeMode);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
+    } catch (const std::exception& error) {
+        vsapi->mapSetError(out, ("RIFEMV: "s + error.what()).c_str());
+        vsapi->freeNode(pairData->node);
+        vsapi->freeNode(mvClip);
+
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
+        return;
     } catch (const char* error) {
         vsapi->mapSetError(out, ("RIFEMV: "s + error).c_str());
         vsapi->freeNode(pairData->node);
@@ -1768,6 +2019,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 
     const auto outputVi = pairData->vi;
     const auto mvConfig = pairData->mvConfig;
+    const auto mvPerfStatsEnabled = pairData->perfStats;
+    const auto mvPerf = pairData->perf;
     VSFilterDependency pairDeps[]{ { pairData->node, rpGeneral } };
     pairNode = vsapi->createVideoFilter2("RIFEMVPair", &pairData->vi, rifeMVPairGetFrame, rifeMVPairFree, fmParallel,
                                          pairDeps, 1, pairData.get(), core);
@@ -1786,6 +2039,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     backwardData->analysisData = mvConfig.backwardAnalysisData;
     backwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, true);
     backwardData->backward = true;
+    backwardData->perfStats = mvPerfStatsEnabled;
+    backwardData->perf = mvPerf;
     VSFilterDependency backwardDeps[]{ { backwardData->node, rpGeneral } };
     backwardNode = vsapi->createVideoFilter2("RIFEMVBackward", &backwardData->vi, rifeMVOutputGetFrame, rifeMVOutputFree,
                                              fmParallel, backwardDeps, 1, backwardData.get(), core);
@@ -1803,6 +2058,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     forwardData->analysisData = mvConfig.forwardAnalysisData;
     forwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, false);
     forwardData->backward = false;
+    forwardData->perfStats = mvPerfStatsEnabled;
+    forwardData->perf = mvPerf;
     VSFilterDependency forwardDeps[]{ { forwardData->node, rpGeneral } };
     forwardNode = vsapi->createVideoFilter2("RIFEMVForward", &forwardData->vi, rifeMVOutputGetFrame, rifeMVOutputFree,
                                             fmParallel, forwardDeps, 1, forwardData.get(), core);
@@ -1835,13 +2092,15 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
         pairData->vi = *vsapi->getVideoInfo(pairData->node);
+        const auto sourceVi = pairData->vi;
+        bool sourceConverted{};
         int err;
 
-        if (!vsh::isConstantVideoFormat(&pairData->vi) ||
-            pairData->vi.format.colorFamily != cfRGB ||
-            pairData->vi.format.sampleType != stFloat ||
-            pairData->vi.format.bitsPerSample != 32)
-            throw "only constant RGB format 32 bit float input supported";
+        const auto inferenceInput = buildMotionVectorInferenceClip(in, pairData->node, sourceVi, core, vsapi);
+        vsapi->freeNode(pairData->node);
+        pairData->node = inferenceInput.node;
+        pairData->vi = inferenceInput.vi;
+        sourceConverted = inferenceInput.convertedFromYUV;
 
         if (ncnn::create_gpu_instance())
             throw "failed to create GPU instance";
@@ -1858,6 +2117,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         auto gpuThread{ vsapi->mapGetIntSaturated(in, "gpu_thread", 0, &err) };
         if (err)
             gpuThread = 2;
+        const auto perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
         if (err)
@@ -1900,11 +2160,13 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
             if (!vsh::isConstantVideoFormat(&mvClipVi))
                 throw "mv_clip must have a constant format";
 
-            if (mvClipVi.width != pairData->vi.width || mvClipVi.height != pairData->vi.height)
+            if (mvClipVi.width != sourceVi.width || mvClipVi.height != sourceVi.height)
                 throw "mv_clip dimensions must match clip";
 
             if (!mvBitsSpecified)
                 mvBits = mvClipVi.format.bitsPerSample;
+        } else if (!mvBitsSpecified && sourceConverted) {
+            mvBits = sourceVi.format.bitsPerSample;
         }
 
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
@@ -1943,11 +2205,12 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
             throw "mv_block_reduce must be 0 (center) or 1 (average)";
 
-        pairData->mvConfig = createMotionVectorConfig(pairData->vi, hasMVClip ? &mvClipVi : nullptr,
+        const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
+        pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi,
                                                       mvUseChroma, mvBlockSize, mvOverlap, mvPel, 1,
                                                       mvBits, mvHPadding, mvVPadding, mvBlockReduce);
         for (auto delta = 1; delta <= maxDelta; delta++) {
-            outputConfigs[delta] = createMotionVectorConfig(pairData->vi, hasMVClip ? &mvClipVi : nullptr,
+            outputConfigs[delta] = createMotionVectorConfig(pairData->vi, metadataVi,
                                                             mvUseChroma, mvBlockSize, mvOverlap, mvPel, delta,
                                                             mvBits, mvHPadding, mvVPadding, mvBlockReduce);
         }
@@ -1962,8 +2225,22 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
         sourceNode = vsapi->addNodeRef(pairData->node);
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        pairData->perfStats = perfStats;
+        if (pairData->perfStats) {
+            pairData->perf = std::make_shared<MotionVectorPerfStats>();
+            pairData->perfLabel = std::string(functionName);
+        }
         pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding, flowResizeMode);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
+    } catch (const std::exception& error) {
+        vsapi->mapSetError(out, (std::string(functionName) + ": " + error.what()).c_str());
+        vsapi->freeNode(pairData->node);
+        vsapi->freeNode(mvClip);
+        vsapi->freeNode(sourceNode);
+
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
+        return;
     } catch (const char* error) {
         vsapi->mapSetError(out, (std::string(functionName) + ": " + error).c_str());
         vsapi->freeNode(pairData->node);
@@ -1987,6 +2264,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
             ncnn::destroy_gpu_instance();
         return;
     }
+    const auto approxPerfStats = pairData->perfStats;
+    const auto approxPerf = pairData->perf;
     pairData.release();
 
     const auto createOutputNode = [&](const MotionVectorConfig& mvConfig, const bool backward) {
@@ -1998,6 +2277,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         outputData->analysisData = backward ? mvConfig.backwardAnalysisData : mvConfig.forwardAnalysisData;
         outputData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, backward);
         outputData->backward = backward;
+        outputData->perfStats = approxPerfStats;
+        outputData->perf = approxPerf;
         VSFilterDependency deps[]{ { outputData->node, rpGeneral }, { outputData->sourceNode, rpGeneral } };
         auto node = vsapi->createVideoFilter2(backward ? "RIFEMVApproxBackward" : "RIFEMVApproxForward",
                                               &outputData->vi, rifeMVApproxOutputGetFrame, rifeMVApproxOutputFree,
@@ -2078,6 +2359,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "mv_delta:int:opt;"
                              "mv_bits:int:opt;"
                              "mv_clip:vnode:opt;"
+                             "matrix_in_s:data:opt;"
+                             "range_in_s:data:opt;"
                              "mv_hpad:int:opt;"
                              "mv_vpad:int:opt;"
                              "mv_block_reduce:int:opt;"
@@ -2095,12 +2378,15 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_thread:int:opt;"
                              "flow_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
+                             "perf_stats:int:opt;"
                              "mv_block_size:int:opt;"
                              "mv_overlap:int:opt;"
                              "mv_pel:int:opt;"
                              "mv_delta:int:opt;"
                              "mv_bits:int:opt;"
                              "mv_clip:vnode:opt;"
+                             "matrix_in_s:data:opt;"
+                             "range_in_s:data:opt;"
                              "mv_hpad:int:opt;"
                              "mv_vpad:int:opt;"
                              "mv_block_reduce:int:opt;"
@@ -2115,11 +2401,14 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_thread:int:opt;"
                              "flow_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
+                             "perf_stats:int:opt;"
                              "mv_block_size:int:opt;"
                              "mv_overlap:int:opt;"
                              "mv_pel:int:opt;"
                              "mv_bits:int:opt;"
                              "mv_clip:vnode:opt;"
+                             "matrix_in_s:data:opt;"
+                             "range_in_s:data:opt;"
                              "mv_hpad:int:opt;"
                              "mv_vpad:int:opt;"
                              "mv_block_reduce:int:opt;"
@@ -2134,11 +2423,14 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_thread:int:opt;"
                              "flow_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
+                             "perf_stats:int:opt;"
                              "mv_block_size:int:opt;"
                              "mv_overlap:int:opt;"
                              "mv_pel:int:opt;"
                              "mv_bits:int:opt;"
                              "mv_clip:vnode:opt;"
+                             "matrix_in_s:data:opt;"
+                             "range_in_s:data:opt;"
                              "mv_hpad:int:opt;"
                              "mv_vpad:int:opt;"
                              "mv_block_reduce:int:opt;"
