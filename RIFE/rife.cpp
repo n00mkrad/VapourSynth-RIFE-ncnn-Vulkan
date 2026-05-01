@@ -805,7 +805,12 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             if (rife_flow_double_vectors->forward(flow_resized_gpu, flow_scaled_gpu, cmd, opt) == 0)
             {
                 cmd.record_clone(flow_scaled_gpu, flow_cpu, opt);
-                cmd.submit_and_wait();
+                if (cmd.submit_and_wait() != 0)
+                {
+                    vkdev->reclaim_blob_allocator(blob_vkallocator);
+                    vkdev->reclaim_staging_allocator(staging_vkallocator);
+                    return -1;
+                }
                 used_gpu_resize = true;
             }
         }
@@ -821,7 +826,12 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         }
 
         cmd.record_clone(flow, flow_cpu, opt);
-        cmd.submit_and_wait();
+        if (cmd.submit_and_wait() != 0)
+        {
+            vkdev->reclaim_blob_allocator(blob_vkallocator);
+            vkdev->reclaim_staging_allocator(staging_vkallocator);
+            return -1;
+        }
     }
 
     ncnn::Mat flow_cpu_unpacked;
