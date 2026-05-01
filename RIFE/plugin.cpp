@@ -236,15 +236,33 @@ static ResolvedRIFEModel resolveRIFEModel(std::string modelPath) {
 }
 
 static bool isEarlyUnsupportedRIFEV4Model(const std::string& modelPath) {
+    const auto containsVersionToken = [&](const char* token) {
+        const auto tokenLength = std::strlen(token);
+        auto tokenPos = modelPath.find(token);
+
+        while (tokenPos != std::string::npos) {
+            const auto tokenEndPos = tokenPos + tokenLength;
+            const auto hasNumericSuffix = tokenEndPos < modelPath.size() &&
+                                          modelPath[tokenEndPos] >= '0' &&
+                                          modelPath[tokenEndPos] <= '9';
+            if (!hasNumericSuffix)
+                return true;
+
+            tokenPos = modelPath.find(token, tokenPos + 1);
+        }
+
+        return false;
+    };
+
     const auto plainRifeV4Path = modelPath.find("rife-v4") != std::string::npos &&
                                  modelPath.find("rife-v4.") == std::string::npos;
     if (plainRifeV4Path)
         return true;
 
-    return modelPath.find("rife-v4.0") != std::string::npos ||
-           modelPath.find("rife-v4.1") != std::string::npos ||
-           modelPath.find("rife4.0") != std::string::npos ||
-           modelPath.find("rife4.1") != std::string::npos;
+    return containsVersionToken("rife-v4.0") ||
+           containsVersionToken("rife-v4.1") ||
+           containsVersionToken("rife4.0") ||
+           containsVersionToken("rife4.1");
 }
 
 static bool supportsMotionVectorExport(const ResolvedRIFEModel& resolvedModel) {
