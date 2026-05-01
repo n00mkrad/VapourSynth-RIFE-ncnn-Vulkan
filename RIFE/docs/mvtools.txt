@@ -1,0 +1,331 @@
+# MVTools for VapourSynth
+
+Block-matching motion estimation and compensation plugin (ported from AviSynth). Uses SAD (Sum of Absolute Differences) to find motion vectors (MVs) between frames. Used for temporal denoising, framerate conversion, image restoration, motion blur, stabilization.
+
+Pipeline: `mv.Super` (prepares hierarchical clip) → `mv.Analyse` (estimates motion vectors) → client functions (compensate/interpolate/denoise/mask).
+
+## AviSynth→VapourSynth Changes
+
+Removed globally: `planar`. Renamed: `isse`→`opt`.
+- **Analyse**: removed `temporal`,`outfile`,`sadx264`; added `fields`,`tff`,`search_coarse`
+- **Recalculate**: removed `outfile`,`sadx264`; added `fields`,`tff`
+- **Compensate**: removed `recursion`; added `tff`
+- **Flow**: added `tff`
+- **SCDetection**: removed `ysc` (uses `_SceneChangePrev`/`_SceneChangeNext` frame props)
+- **Degrain1/2**: added `limitc`
+- **DepanAnalyse** (was MDepan): removed `log`,`range`; added `fields`,`tff`
+- **DepanEstimate**: removed `range`,`log`,`debug`,`extlog`; added `fields`,`tff`
+- **DepanCompensate** (was DePan): removed `inputlog`
+- **DepanStabilise** (was DePanStabilize): removed `inputlog`; methods -1,2 unavailable
+
+## Common Parameters
+
+- **thscd1** (int, default=400): SAD threshold for block-changed detection (scene change engine). Always specified as 8×8-block-equivalent. Higher = fewer blocks flagged as changed. For 8×8 block with every pixel differing by 5: SAD=320. Scaled internally for other block sizes.
+- **thscd2** (int, default=130): Fraction of blocks that must change for scene-change (0=0%, 255=100%). 130≈51%.
+- **opt** (bint, default=True): Enable SIMD/CPU optimizations.
+
+## mv.Super
+
+`mv.Super(clip[, hpad=16, vpad=16, pel=2, levels=0, chroma=True, sharp=2, rfilter=2, pelclip=None, opt=True])`
+
+Prepares hierarchical multi-level super clip. Required by both Analyse and client functions.
+
+|Param|Default|Description|
+|-|-|-|
+|hpad/vpad|16|Horizontal/vertical border padding for better edge estimation|
+|pel|2|Sub-pixel precision: 1=pixel, 2=half-pixel, 4=quarter-pixel|
+|levels|0|Hierarchy levels (0=auto/all). Analyse needs all; clients need only finest (level 1)|
+|chroma|True|Process chroma planes|
+|sharp|2|Subpixel interpolation (pel≥2): 0=bilinear, 1=bicubic 4-tap Catmull-Rom, 2=Wiener 6-tap|
+|rfilter|2|Level-reduction filter: 0=SimpleResize, 1=triangle/ReduceBy2, 2=BilinearResize, 3=quadratic, 4=BicubicResize(b=1,c=0)|
+|pelclip|None|External upsampled clip for subpixel (pel>1). Pixels at multiples of pel must be original; others interpolated. E.g. `resize.Lanczos(clip, w*2, h*2, src_left=0.25, src_top=0.25)` or EEDI2/EEDI3|
+
+## mv.Analyse
+
+`mv.Analyse(super[, blksize=8, blksizev=blksize, levels=0, search=4, searchparam=2, pelsearch=0, isb=False, lambda_, chroma=True, delta=1, truemotion=True, lsad, plevel, global_, pnew, pzero=pnew, pglobal=0, overlap=0, overlapv=overlap, divide=False, badsad=10000, badrange=24, opt=True, meander=True, trymany=False, fields=False, tff, search_coarse=3, dct=0])`
+
+Estimates motion vectors using hierarchical block-matching. Output is a special clip containing MV data.
+
+**Block size**: `blksize` (horizontal): 4,8,16,32,64,128 (default=8). `blksizev` defaults to blksize. Extra combos: 8×4, 16×8, 16×2, 32×16, 64×32, 64×64, 128×64, 128×128.
+
+**Search methods** (search, searchparam, pelsearch):
+
+|search|Method|searchparam meaning|
+|-|-|-|
+|0|OneTimeSearch|step (progressively refined if >1)|
+|1|NStepSearch|N steps|
+|2|Logarithmic/Diamond|initial step (refined)|
+|3|Exhaustive|radius (square=2r+1). Slow, best SAD|
+|4|Hexagon (x264-like)|range|
+|5|UMH (x264-like)|range|
+|6|Horizontal exhaustive|radius|
+|7|Vertical exhaustive|radius|
+
+Defaults: search=4, searchparam=2, pelsearch=0 (→pel).
+`search_coarse`: search type at coarse levels, default=3 (Exhaustive).
+
+**Direction/reference**:
+- `isb` (default=False): False=forward (prev→cur), True=backward (next→cur)
+- `delta` (default=1): frame distance to reference. Negative/zero = fixed reference frame (absolute index = -delta; isb ignored). Fixed ref only works with Compensate, Flow, Mask.
+
+**True motion parameters** (`truemotion` preset: True=coherent motion field, False=best-SAD):
+
+|Param|truemotion=False|truemotion=True|Description|
+|-|-|-|-|
+|lambda|0|1000*blksize*blksizev/64|Vector field coherence (SAD penalty for deviation from predictor, /256)|
+|lsad|400|1200|SAD limit above which lambda decreases (prevents bad predictors). Scaled to blksize=8|
+|pnew|0|50|Penalty/256 on SAD for new candidate vs predictor|
+|plevel|0|1|Lambda level scaling: 0=none, 1=linear, 2=quadratic|
+|global|0|1|Estimate global pan motion as predictor (0=off, 1=on)|
+|pzero|=pnew|=pnew|Penalty/256 for zero vector|
+|pglobal|0|0|Penalty/256 for global predictor|
+
+**Overlap**: `overlap`/`overlapv` (default=0). Must be even and <blksize (≤blksize/2 for Compensate). Step=(blksize-overlap). Supported by: Flow, FlowInter, FlowFPS, Mask, Compensate, Degrain1/2/3.
+
+**DCT modes** (`dct`, default=0):
+0=spatial only, 1=DCT only, 2=mixed (weight by mean luma diff), 3=adaptive spatial→mixed, 4=adaptive spatial→mixed (more DCT weight), 5=SATD instead of SAD (luma only), 6-10=SATD variants of 2-4. Modes 5-10 work with blocks >16×16 in VS port.
+
+**Other**: `divide` (default=False): post-divide blocks into 4 subblocks. `badsad` (default=10000, scaled to 8×8): threshold for wider re-search. `badrange` (default=24px): re-search radius (positive=UMH, negative=Exhaustive). `meander` (default=True): alternate L→R/R→L scan. `trymany` (default=False): try many predictors. `fields` (default=False): clip was SeparateFields'd. `tff`: top-field-first (required when fields=True). `chroma` (default=True): use chroma for estimation.
+
+## mv.Compensate
+
+`mv.Compensate(clip, super, vectors[, scbehavior=1, thsad=10000, fields=False, time=100.0, thscd1=400, thscd2=130, opt=True, tff])`
+
+Block-based full motion compensation. Moves reference blocks along vectors to current frame positions.
+
+- `scbehavior` (default=1): 1=keep current frame on scene change, else copy reference frame
+- `thsad` (default=10000): blocks with SAD>thsad use source instead of compensated block
+- `fields` (default=False): add vertical halfpixel shift for fieldbased video (pel≥2, for deinterlacing)
+- `time` (default=100.0): percent of compensation (partial=intermediate time position)
+- Overlapped blocks: window summation (like FFT3DFilter, up to blksize/2)
+
+## mv.Mask
+
+`mv.Mask(clip, vectors[, ml=100.0, gamma=1.0, kind=0, time=100.0, ysc=0, thscd1=400, thscd2=130, opt=True])`
+
+Creates mask from MV data, interpolated to full frame. Values 0-255.
+
+|kind|Mask type|
+|-|-|
+|0|Motion vector length (0=no motion, saturates at ml)|
+|1|SAD values (normalized by blocksize²/4, scaled by ml)|
+|2|Occlusion (rupture/tensile), scaled by ml|
+|3|Horizontal MV component (pel units + 128), scaled by ml|
+|4|Vertical MV component (pel units + 128), scaled by ml|
+|5|Motion colormap (x,y→U,V planes, pel units + 128, scaled by ml)|
+
+- `gamma` (default=1.0): output exponent (1=linear, 2=quadratic)
+- `ysc` (default=0): mask value on scene change
+
+## mv.SCDetection
+
+`mv.SCDetection(clip, vectors[, thscd1=400, thscd2=130])`
+
+Returns frames unchanged with `_SceneChangePrev`/`_SceneChangeNext` frame properties attached.
+
+## mv.Finest
+
+`mv.Finest(super[, opt=True])`
+
+Extracts finest-level padded subpel plane from super clip (debug/inspection).
+
+Note: mv.Show is NOT available in VapourSynth. Use mv.Mask kind=1-5 for visualization.
+
+## mv.DepanAnalyse
+
+`mv.DepanAnalyse(clip, vectors[, mask, zoom=True, rot=True, pixaspect=1.0, error=15.0, info=False, wrong=10.0, zerow=0.05, thscd1=400, thscd2=130, fields=False, tff])`
+
+Estimates global motion (pan/zoom/rotation) from MVs. Output used by DepanCompensate/DepanStabilise. Iterative estimation using good blocks only. Rejects: border blocks (or by mask), high-SAD blocks, motion outliers. Null motion on large error or scene change.
+
+- `mask`: weight clip for block vectors (black=reject). If undefined, 4 border blocks rejected.
+- `pixaspect`: pixel aspect ratio (PAL=1.094, NTSC=0.911)
+- `error`: max mean motion difference
+- `wrong`: limit to disable blocks very different from neighbors
+- `zerow` (default=0.05): weight of zero vectors
+- For interlaced: separate fields first, pass fields=True, tff=True
+
+## mv.Flow
+
+`mv.Flow(clip, super, vectors[, time=100.0, mode=0, fields=False, thscd1=400, thscd2=130, opt=True, tff])`
+
+Pixel-based motion compensation (bilinear interpolation of block MVs per pixel). No blocking artifacts but can produce deformation. True motion strongly recommended.
+
+- `mode`: 0=fetch pixels to destination (production), 1=shift from source (debug, shows empty spaces)
+
+## mv.FlowInter
+
+`mv.FlowInter(clip, super, mvbw, mvfw[, time=50.0, ml=100.0, blend=True, thscd1=400, thscd2=130, opt=True])`
+
+Pixel-based motion interpolation between frames using forward+backward MVs. Uses internal occlusion masks (kind=2) and time-weighting. True motion strongly recommended.
+
+- `time` (default=50.0): interpolation position (%)
+- `ml` (default=100.0): occlusion mask scale (lower=stronger mask)
+- `blend` (default=True): blend on scene change (False=repeat last frame)
+
+## mv.FlowFPS
+
+`mv.FlowFPS(clip, super, mvbw, mvfw[, num=25, den=1, mask=2, ml=100.0, blend=True, thscd1=400, thscd2=130, opt=True])`
+
+Pixel-based framerate conversion. Uses Flow method + occlusion masks. True motion strongly recommended.
+
+- `num`/`den`: output fps=num/den. Doubled NTSC: 60000/1001. Doubled NTSC FILM: 48000/1001. num=0 or den=0 → doubled input fps.
+- `mask`: 0=simple occlusion masks (fastest), 1=+static zero vectors at occlusion, 2=+extra adjacent-frame vectors (slowest, default)
+- `ml` (default=100.0): occlusion mask scale (greater=weaker)
+
+## mv.BlockFPS
+
+`mv.BlockFPS(clip, super, mvbw, mvfw[, num=25, den=1, mode=3, ml=100.0, blend=True, thscd1=400, thscd2=130, opt=True])`
+
+Block-based framerate conversion. Faster than FlowFPS but may produce blocking without overlap. True motion strongly recommended.
+
+- `num`/`den`: same as FlowFPS
+- `mode`: 0=avg fwd+bwd (fastest), 1=static median, 2=dynamic median, 3=time-weighted masked combination (default), 4=mode 3 + static average by occlusion mask, 5=occlusion mask (debug), 6-8=modes 3-5 using SAD mask
+
+## mv.FlowBlur
+
+`mv.FlowBlur(clip, super, mvbw, mvfw[, blur=50.0, prec=1, thscd1=400, thscd2=130, opt=True])`
+
+Experimental motion blur (FILM shutter simulation) by overlaying partially compensated pixels at intermediate times.
+
+- `blur` (default=50.0): shutter time interval (%)
+- `prec` (default=1): max pixel step between blurred samples
+
+## mv.Degrain1 / Degrain2 / Degrain3
+
+`mv.Degrain1(clip, super, mvbw, mvfw[, thsad=400, thsadc=thsad, plane=4, limit=255, limitc=limit, thscd1=400, thscd2=130, opt=True])`
+`mv.Degrain2(clip, super, mvbw, mvfw, mvbw2, mvfw2[, ...same params...])`
+`mv.Degrain3(clip, super, mvbw, mvfw, mvbw2, mvfw2, mvbw3, mvfw3[, ...same params...])`
+
+Temporal denoising via SAD-weighted averaging of motion-compensated neighboring frames. Supports overlapped blocks (up to blksize/2).
+
+Degrain1=TR1 (±1 frame), Degrain2=TR2 (±2), Degrain3=TR3 (±3). Higher TR is slower but slightly better.
+
+- `thsad` (default=400, scaled to 8×8): blocks with SAD>thsad get zero weight. Low→staggered denoising, high→ghosting.
+- `thsadc`: chroma threshold (default=thsad)
+- `plane`: 0=luma, 1=U, 2=V, 3=UV, 4=all (default)
+- `limit`/`limitc` (default=255): max pixel change (luma/chroma)
+
+## mv.Recalculate
+
+`mv.Recalculate(super, vectors[, thsad=200, smooth=1, blksize=8, blksizev=blksize, search=4, searchparam=2, lambda_, chroma=True, truemotion=True, pnew, overlap=0, overlapv=overlap, divide=False, opt=True, meander=True, fields=False, tff, dct=0])`
+
+Refines existing MVs (from Analyse) at finest level only, using different super clip or parameters (e.g. smaller blocks). Only vectors with SAD>thsad (default=200, scaled to 8×8) are re-estimated; good vectors keep their motion but get updated SAD.
+
+- `smooth` (default=1): coarse→fine block subdivision: 0=nearest block, 1=bilinear interpolation of 4 neighbors
+- Other params: same meaning as Analyse (can use different values)
+
+## Examples
+
+All examples assume: `import vapoursynth as vs; core = vs.core` with `clip` as input.
+
+**Basic MV computation:**
+```
+sup = core.mv.Super(clip)
+fwd = core.mv.Analyse(sup, isb=False)   # forward
+bwd = core.mv.Analyse(sup, isb=True)    # backward
+```
+
+**Motion mask:**
+```
+mask = core.mv.Mask(clip, fwd)
+```
+
+**Occlusion-masked deblock of compensated frame:**
+```
+sup = core.mv.Super(clip)
+vec = core.mv.Analyse(sup, isb=False)
+comp = core.mv.Compensate(clip, sup, vec)
+blur = core.deblock.Deblock(comp, quant=51)
+mask = core.mv.Mask(clip, vec, kind=2, ml=50)
+clip = core.std.MaskedMerge(comp, blur, mask)
+```
+
+**Recreate bad frames (50,60) via FlowInter:**
+```
+sup = core.mv.Super(clip)
+bv = core.mv.Analyse(sup, isb=True, delta=2)
+fv = core.mv.Analyse(sup, isb=False, delta=2)
+inter = core.mv.FlowInter(clip, sup, bv, fv, time=50.0, ml=70.0)
+clip = core.std.Trim(clip,0,49) + core.std.Trim(inter,49,49) + core.std.Trim(clip,51,59) + core.std.Trim(inter,59,59) + core.std.Trim(clip,61)
+```
+
+**FlowFPS — change to 50fps:**
+```
+sup = core.mv.Super(clip, pel=2)
+bv = core.mv.Analyse(sup, isb=True)
+fv = core.mv.Analyse(sup, isb=False)
+clip = core.mv.FlowFPS(clip, sup, bv, fv, num=50, den=1, ml=100.0)
+```
+
+**FlowFPS — fastest double-fps:**
+```
+sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, chroma=False)
+bv = core.mv.Analyse(sup, blksize=32, isb=True, chroma=False, searchparam=1, search=0)
+fv = core.mv.Analyse(sup, blksize=32, isb=False, chroma=False, searchparam=1, search=0)
+clip = core.mv.FlowFPS(clip, sup, bv, fv, num=2*clip.fps_num, den=clip.fps_den, mask=0)
+```
+
+**FlowFPS — best quality double-fps:**
+```
+sup = core.mv.Super(clip, pel=2)
+bv = core.mv.Analyse(sup, overlap=4, isb=True, search=3)
+fv = core.mv.Analyse(sup, overlap=4, isb=False, search=3)
+clip = core.mv.FlowFPS(clip, sup, bv, fv, num=2*clip.fps_num, den=clip.fps_den)
+```
+
+**External temporal denoiser with 3 frames:**
+```
+sup = core.mv.Super(clip)
+bv = core.mv.Analyse(sup, isb=True)
+fv = core.mv.Analyse(sup, isb=False)
+fcomp = core.mv.Flow(clip, sup, fv, thscd1=500)
+bcomp = core.mv.Flow(clip, sup, bv, thscd1=500)
+interleaved = core.std.Interleave([fcomp, clip, bcomp])
+denoised = my_temporal_denoiser(interleaved)
+clip = core.std.SelectEvery(denoised, cycle=3, offsets=1)
+```
+
+**Prefiltered analysis, unfiltered compensation:**
+```
+prefilt = core.std.BoxBlur(clip)
+sup = core.mv.Super(clip, levels=1)       # 1 level for Compensate
+supfilt = core.mv.Super(prefilt)           # all levels for Analyse
+bv = core.mv.Analyse(supfilt, isb=True)
+fv = core.mv.Analyse(supfilt, isb=False)
+fcomp = core.mv.Compensate(clip, sup, fv)
+bcomp = core.mv.Compensate(clip, sup, bv)
+interleaved = core.std.Interleave([fcomp, clip, bcomp])
+denoised = my_temporal_denoiser(interleaved)
+clip = core.std.SelectEvery(denoised, cycle=3, offsets=1)
+```
+
+**Degrain2 with overlap + subpixel:**
+```
+sup = core.mv.Super(clip, pel=2, sharp=1)
+bv2 = core.mv.Analyse(sup, isb=True, delta=2, overlap=4)
+bv1 = core.mv.Analyse(sup, isb=True, delta=1, overlap=4)
+fv1 = core.mv.Analyse(sup, isb=False, delta=1, overlap=4)
+fv2 = core.mv.Analyse(sup, isb=False, delta=2, overlap=4)
+clip = core.mv.Degrain2(clip, sup, bv1, fv1, bv2, fv2, thsad=400)
+```
+
+**External pelclip (EEDI2):**
+```
+ups = core.eedi2.EEDI2(clip, field=1)
+ups = core.resize.Lanczos(ups, 2*clip.width, 2*clip.height, src_left=0.25)
+sup = core.mv.Super(clip, pel=2, pelclip=ups)
+bv = core.mv.Analyse(sup, isb=True, overlap=4)
+clip = core.mv.Compensate(clip, sup, bv)
+```
+
+**Prefiltered + Recalculate (FlowFPS):**
+```
+prefilt = my_smoother(clip)
+sup = core.mv.Super(clip, hpad=16, vpad=16, levels=1)   # 1 level for Recalculate
+supfilt = core.mv.Super(prefilt, hpad=16, vpad=16)       # all levels for Analyse
+bv = core.mv.Analyse(supfilt, isb=True, blksize=16)
+fv = core.mv.Analyse(supfilt, isb=False, blksize=16)
+fv_re = core.mv.Recalculate(sup, fv, blksize=8, thsad=100)
+bv_re = core.mv.Recalculate(sup, bv, blksize=8, thsad=100)
+clip = core.mv.FlowFPS(clip, sup, bv_re, fv_re, num=50, den=1)
+```
