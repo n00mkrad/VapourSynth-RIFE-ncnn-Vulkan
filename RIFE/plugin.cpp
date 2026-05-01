@@ -115,7 +115,7 @@ struct ResolvedRIFEModel final {
 };
 
 constexpr auto RIFEMVModelRequirementError =
-    "motion-vector export requires the rife-v3.1 model or a rife-v4.2+ model";
+    "motion-vector export requires the rife-v3.1/rife-v3.9 model or a rife-v4.2+ model";
 constexpr auto RIFEMVUnsupportedEarlyV4Error =
     "legacy rife-v4, rife-v4.0, and rife-v4.1 are not supported for motion-vector export; use rife-v4.2 or newer";
 
@@ -267,6 +267,8 @@ static bool isEarlyUnsupportedRIFEV4Model(const std::string& modelPath) {
 
 static bool supportsMotionVectorExport(const ResolvedRIFEModel& resolvedModel) {
     if (resolvedModel.modelPath.find("rife-v3.1") != std::string::npos)
+        return true;
+    if (resolvedModel.modelPath.find("rife-v3.9") != std::string::npos)
         return true;
 
     const auto isV4FamilyPath = resolvedModel.modelPath.find("rife-v4") != std::string::npos ||

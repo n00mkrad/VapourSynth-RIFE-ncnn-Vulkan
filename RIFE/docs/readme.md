@@ -26,7 +26,7 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 
 ## Important limitations
 
-- Motion-vector export supports `rife-v3.1` and `rife-v4.2+` model families.
+- Motion-vector export supports `rife-v3.1`, `rife-v3.9`, and `rife-v4.2+` model families.
 - Legacy `rife-v4` as well as `rife-v4.0` and `rife-v4.1` are not supported for motion-vector export.
 - The analysis input to RIFE must still be constant-format `RGBS`.
 - MVTools usually operates on a different clip, often `YUV420P8`. When that is the case, pass `mv_clip=clip` so the exported MV metadata uses the correct bit depth and chroma subsampling.
