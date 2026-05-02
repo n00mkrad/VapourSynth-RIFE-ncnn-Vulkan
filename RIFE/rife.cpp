@@ -5,6 +5,7 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -662,10 +663,22 @@ static bool extract_v4_flow_blob(ncnn::Extractor& ex, ncnn::VkCompute& cmd, ncnn
     return false;
 }
 
+static int64_t monotonic_now_ns()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0B,
                        const float* src1R, const float* src1G, const float* src1B,
-                       float* flow_out, const int w, const int h, const ptrdiff_t stride) const
+                       float* flow_out, const int w, const int h, const ptrdiff_t stride,
+                       FlowPerfBreakdown* perf) const
 {
+    const bool collect_perf = perf != nullptr;
+    if (collect_perf)
+        *perf = {};
+
     const int channels = 3;
 
     ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
@@ -690,6 +703,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     auto in1_r = in1.channel(0);
     auto in1_g = in1.channel(1);
     auto in1_b = in1.channel(2);
+    const auto cpu_prep_start_ns = collect_perf ? monotonic_now_ns() : 0;
     for (auto y = 0; y < h; y++) {
         for (auto x = 0; x < w; x++) {
             in0_r[w * y + x] = src0R[stride * y + x] * 255.0f;
@@ -700,8 +714,11 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             in1_b[w * y + x] = src1B[stride * y + x] * 255.0f;
         }
     }
+    if (collect_perf)
+        perf->cpuPrepNs += monotonic_now_ns() - cpu_prep_start_ns;
 
     ncnn::VkCompute cmd(vkdev);
+    const auto command_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
 
     ncnn::VkMat in0_gpu;
     ncnn::VkMat in1_gpu;
@@ -820,12 +837,17 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             if (rife_flow_double_vectors->forward(flow_resized_gpu, flow_scaled_gpu, cmd, opt) == 0)
             {
                 cmd.record_clone(flow_scaled_gpu, flow_cpu, opt);
+                if (collect_perf)
+                    perf->commandRecordNs += monotonic_now_ns() - command_record_start_ns;
+                const auto submit_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
                 if (cmd.submit_and_wait() != 0)
                 {
                     vkdev->reclaim_blob_allocator(blob_vkallocator);
                     vkdev->reclaim_staging_allocator(staging_vkallocator);
                     return -1;
                 }
+                if (collect_perf)
+                    perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
                 used_gpu_resize = true;
             }
         }
@@ -841,27 +863,45 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         }
 
         cmd.record_clone(flow, flow_cpu, opt);
+        if (collect_perf)
+            perf->commandRecordNs += monotonic_now_ns() - command_record_start_ns;
+        const auto submit_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
         if (cmd.submit_and_wait() != 0)
         {
             vkdev->reclaim_blob_allocator(blob_vkallocator);
             vkdev->reclaim_staging_allocator(staging_vkallocator);
             return -1;
         }
+        if (collect_perf)
+            perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
     }
 
     ncnn::Mat flow_cpu_unpacked;
+    const auto unpack_start_ns = collect_perf ? monotonic_now_ns() : 0;
     if (unpack_flow_channels(flow_cpu, flow_cpu_unpacked) != 0)
     {
         vkdev->reclaim_blob_allocator(blob_vkallocator);
         vkdev->reclaim_staging_allocator(staging_vkallocator);
         return -1;
     }
+    if (collect_perf)
+        perf->unpackNs += monotonic_now_ns() - unpack_start_ns;
 
     int export_status{};
     if (flow_cpu_unpacked.w >= w && flow_cpu_unpacked.h >= h)
+    {
+        const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
         export_status = copy_flow_output_direct(flow_cpu_unpacked, flow_out, w, h);
+        if (collect_perf)
+            perf->exportDirectNs += monotonic_now_ns() - export_start_ns;
+    }
     else if (flow_cpu_unpacked.w * 2 >= w && flow_cpu_unpacked.h * 2 >= h)
+    {
+        const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
         export_status = copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
+        if (collect_perf)
+            perf->exportResizeNs += monotonic_now_ns() - export_start_ns;
+    }
     else
         export_status = -1;
     if (export_status != 0)

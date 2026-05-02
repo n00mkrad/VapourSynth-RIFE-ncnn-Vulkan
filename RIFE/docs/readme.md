@@ -41,7 +41,7 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 ### Signature
 
 ```python
-core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, flow_scale=1.0, cpu_flow_resize=None, mv=0, mv_backward=1, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, matrix_in_s="709", range_in_s="full", mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0, sc=0, skip=0, skip_threshold=60.0)
+core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, mv=0, mv_backward=1, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, matrix_in_s="709", range_in_s="full", mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0, sc=0, skip=0, skip_threshold=60.0)
 ```
 
 ### New or changed arguments
@@ -56,6 +56,13 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
   Omit this argument for automatic behavior (GPU resize when available, CPU fallback on failure).
   `False` (`0`) forces the GPU resize path only.
   `True` (`1`) forces the CPU resize fallback path.
+
+- `shared_flow_inflight`
+  Global in-flight cap for motion-vector flow inference shared across filter instances on the same GPU.
+  This only affects motion-vector paths (`mv=1`, `RIFEMV`, `RIFEMVApprox2`, `RIFEMVApprox3`).
+  Default: GPU compute queue count.
+  Lower values can reduce CPU contention; higher values can increase throughput on some setups.
+  When explicitly set, local admission is relaxed to at least this value (`max(gpu_thread, shared_flow_inflight)`) so the shared cap remains the primary limiter.
 
 - `mv`
   Enables MVTools vector export mode when set to `1`. In this mode, the output is a vector clip, not an interpolated image clip.
@@ -127,7 +134,7 @@ Use this mode when a function expects only one vector clip.
 ### Signature
 
 ```python
-mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, flow_scale=1.0, cpu_flow_resize=None, perf_stats=False, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, matrix_in_s="709", range_in_s="full", mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0)
+mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, perf_stats=False, mv_block_size=16, mv_overlap=8, mv_pel=1, mv_delta=1, mv_bits=8, mv_clip=None, matrix_in_s="709", range_in_s="full", mv_hpad=0, mv_vpad=0, mv_block_reduce=1, mv_chroma=0)
 ```
 
 ### Return value
@@ -147,6 +154,11 @@ mvbw, mvfw = core.rife.RIFEMV(...)
 - `1`/`True` = force CPU resize
 
 `perf_stats` enables per-filter performance timing. When enabled, a summary is printed to `stderr` when the filter instance is freed (end of clip processing).
+
+`perf_stats` now reports:
+- `semaphore_wait_ms` total wait
+- `local_wait_ms` wait on per-filter `gpu_thread` limiter
+- `shared_wait_ms` wait on the cross-instance `shared_flow_inflight` limiter
 
 ### Recommended usage
 

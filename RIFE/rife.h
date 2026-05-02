@@ -5,6 +5,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 
 // ncnn
 #include "net.h"
@@ -13,6 +14,15 @@ enum class FlowResizeMode {
     Auto,
     ForceGPU,
     ForceCPU
+};
+
+struct FlowPerfBreakdown final {
+    int64_t cpuPrepNs{};
+    int64_t commandRecordNs{};
+    int64_t submitWaitNs{};
+    int64_t unpackNs{};
+    int64_t exportDirectNs{};
+    int64_t exportResizeNs{};
 };
 
 class RIFE
@@ -35,7 +45,8 @@ public:
 
     int process_flow(const float* src0R, const float* src0G, const float* src0B,
                      const float* src1R, const float* src1G, const float* src1B,
-                     float* flow, const int w, const int h, const ptrdiff_t stride) const;
+                     float* flow, const int w, const int h, const ptrdiff_t stride,
+                     FlowPerfBreakdown* perf = nullptr) const;
 
     int process_v4(const float* src0R, const float* src0G, const float* src0B,
                    const float* src1R, const float* src1G, const float* src1B,

@@ -55,7 +55,15 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> pairTotalNs{ 0 };
     std::atomic<int64_t> outputTotalNs{ 0 };
     std::atomic<int64_t> semaphoreWaitNs{ 0 };
+    std::atomic<int64_t> localSemaphoreWaitNs{ 0 };
+    std::atomic<int64_t> sharedSemaphoreWaitNs{ 0 };
     std::atomic<int64_t> processFlowNs{ 0 };
+    std::atomic<int64_t> flowCpuPrepNs{ 0 };
+    std::atomic<int64_t> flowCommandRecordNs{ 0 };
+    std::atomic<int64_t> flowSubmitWaitNs{ 0 };
+    std::atomic<int64_t> flowUnpackNs{ 0 };
+    std::atomic<int64_t> flowExportDirectNs{ 0 };
+    std::atomic<int64_t> flowExportResizeNs{ 0 };
     std::atomic<int64_t> lumaBuildNs{ 0 };
     std::atomic<int64_t> vectorPackNs{ 0 };
     std::atomic<int64_t> displacementBuildNs{ 0 };
@@ -173,7 +181,15 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto pairTotalNs = stats.pairTotalNs.load(std::memory_order_relaxed);
     const auto outputTotalNs = stats.outputTotalNs.load(std::memory_order_relaxed);
     const auto semaphoreWaitNs = stats.semaphoreWaitNs.load(std::memory_order_relaxed);
+    const auto localSemaphoreWaitNs = stats.localSemaphoreWaitNs.load(std::memory_order_relaxed);
+    const auto sharedSemaphoreWaitNs = stats.sharedSemaphoreWaitNs.load(std::memory_order_relaxed);
     const auto processFlowNs = stats.processFlowNs.load(std::memory_order_relaxed);
+    const auto flowCpuPrepNs = stats.flowCpuPrepNs.load(std::memory_order_relaxed);
+    const auto flowCommandRecordNs = stats.flowCommandRecordNs.load(std::memory_order_relaxed);
+    const auto flowSubmitWaitNs = stats.flowSubmitWaitNs.load(std::memory_order_relaxed);
+    const auto flowUnpackNs = stats.flowUnpackNs.load(std::memory_order_relaxed);
+    const auto flowExportDirectNs = stats.flowExportDirectNs.load(std::memory_order_relaxed);
+    const auto flowExportResizeNs = stats.flowExportResizeNs.load(std::memory_order_relaxed);
     const auto lumaBuildNs = stats.lumaBuildNs.load(std::memory_order_relaxed);
     const auto vectorPackNs = stats.vectorPackNs.load(std::memory_order_relaxed);
     const auto displacementBuildNs = stats.displacementBuildNs.load(std::memory_order_relaxed);
@@ -190,11 +206,27 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     std::cerr << "  flow_calls=" << flowCalls
               << " process_flow_ms=" << nsToMs(processFlowNs)
               << " process_flow_avg_ms=" << (flowCalls > 0 ? nsToMs(processFlowNs) / flowCalls : 0.0) << '\n';
+    std::cerr << "  flow_cpu_prep_ms=" << nsToMs(flowCpuPrepNs)
+              << " flow_record_ms=" << nsToMs(flowCommandRecordNs)
+              << " flow_submit_wait_ms=" << nsToMs(flowSubmitWaitNs)
+              << " flow_unpack_ms=" << nsToMs(flowUnpackNs)
+              << " flow_export_direct_ms=" << nsToMs(flowExportDirectNs)
+              << " flow_export_resize_ms=" << nsToMs(flowExportResizeNs) << '\n';
+    std::cerr << "  flow_cpu_prep_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCpuPrepNs) / flowCalls : 0.0)
+              << " flow_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCommandRecordNs) / flowCalls : 0.0)
+              << " flow_submit_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSubmitWaitNs) / flowCalls : 0.0)
+              << " flow_unpack_avg_ms=" << (flowCalls > 0 ? nsToMs(flowUnpackNs) / flowCalls : 0.0)
+              << " flow_export_direct_avg_ms=" << (flowCalls > 0 ? nsToMs(flowExportDirectNs) / flowCalls : 0.0)
+              << " flow_export_resize_avg_ms=" << (flowCalls > 0 ? nsToMs(flowExportResizeNs) / flowCalls : 0.0) << '\n';
     std::cerr << "  semaphore_wait_ms=" << nsToMs(semaphoreWaitNs)
+              << " local_wait_ms=" << nsToMs(localSemaphoreWaitNs)
+              << " shared_wait_ms=" << nsToMs(sharedSemaphoreWaitNs)
               << " luma_build_ms=" << nsToMs(lumaBuildNs)
               << " vector_pack_ms=" << nsToMs(vectorPackNs)
               << " displacement_build_ms=" << nsToMs(displacementBuildNs)
               << " compose_ms=" << nsToMs(composeNs) << std::endl;
+    std::cerr << "  local_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(localSemaphoreWaitNs) / flowCalls : 0.0)
+              << " shared_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(sharedSemaphoreWaitNs) / flowCalls : 0.0) << std::endl;
 }
 
 static MotionVectorScratchBuffers& getMotionVectorScratchBuffers() noexcept {
@@ -204,18 +236,20 @@ static MotionVectorScratchBuffers& getMotionVectorScratchBuffers() noexcept {
 
 static std::shared_ptr<std::counting_semaphore<>> acquireSharedFlowSemaphore(const int gpuId, const int maxInFlight) {
     static std::mutex mutex;
-    static std::unordered_map<int, std::weak_ptr<std::counting_semaphore<>>> semaphores;
+    static std::unordered_map<uint64_t, std::weak_ptr<std::counting_semaphore<>>> semaphores;
 
     std::lock_guard<std::mutex> lock(mutex);
-    auto it = semaphores.find(gpuId);
+    const auto capacity = std::max(1, maxInFlight);
+    const auto key = (static_cast<uint64_t>(static_cast<uint32_t>(gpuId)) << 32) |
+                     static_cast<uint32_t>(capacity);
+    auto it = semaphores.find(key);
     if (it != semaphores.end()) {
         if (auto existing = it->second.lock())
             return existing;
     }
 
-    const auto capacity = std::max(1, maxInFlight);
     auto created = std::make_shared<std::counting_semaphore<>>(capacity);
-    semaphores[gpuId] = created;
+    semaphores[key] = created;
     return created;
 }
 
@@ -225,15 +259,38 @@ static int processFlowWithSemaphores(const RIFE* const rife,
                                      const float* src0R, const float* src0G, const float* src0B,
                                      const float* src1R, const float* src1G, const float* src1B,
                                      float* flowOut, const int width, const int height, const ptrdiff_t stride,
-                                     int64_t* waitNs = nullptr) noexcept {
-    const auto waitStartNs = waitNs ? monotonicNowNs() : 0;
-    localSemaphore->acquire();
-    if (sharedSemaphore)
-        sharedSemaphore->acquire();
-    if (waitNs)
-        *waitNs = monotonicNowNs() - waitStartNs;
+                                     int64_t* waitNs = nullptr,
+                                     int64_t* localWaitNs = nullptr,
+                                     int64_t* sharedWaitNs = nullptr,
+                                     FlowPerfBreakdown* flowPerf = nullptr) noexcept {
+    int64_t localWait{};
+    int64_t sharedWait{};
+    if (localWaitNs || waitNs) {
+        const auto localWaitStartNs = monotonicNowNs();
+        localSemaphore->acquire();
+        localWait = monotonicNowNs() - localWaitStartNs;
+    } else {
+        localSemaphore->acquire();
+    }
 
-    const auto status = rife->process_flow(src0R, src0G, src0B, src1R, src1G, src1B, flowOut, width, height, stride);
+    if (sharedSemaphore) {
+        if (sharedWaitNs || waitNs) {
+            const auto sharedWaitStartNs = monotonicNowNs();
+            sharedSemaphore->acquire();
+            sharedWait = monotonicNowNs() - sharedWaitStartNs;
+        } else {
+            sharedSemaphore->acquire();
+        }
+    }
+
+    if (localWaitNs)
+        *localWaitNs = localWait;
+    if (sharedWaitNs)
+        *sharedWaitNs = sharedWait;
+    if (waitNs)
+        *waitNs = localWait + sharedWait;
+
+    const auto status = rife->process_flow(src0R, src0G, src0B, src1R, src1G, src1B, flowOut, width, height, stride, flowPerf);
 
     if (sharedSemaphore)
         sharedSemaphore->release();
@@ -612,6 +669,10 @@ struct SADContext final {
     const float* referenceLuma;
 };
 
+static inline int64_t roundPositiveToInt64(const double value) noexcept {
+    return static_cast<int64_t>(value + 0.5);
+}
+
 static void buildFrameLumaPlane(const VSFrame* frame, const int width, const int height, const int stride,
                                 std::vector<float>& luma, const VSAPI* vsapi) noexcept {
     luma.resize(static_cast<size_t>(stride) * height);
@@ -668,22 +729,29 @@ static int64_t computeBlockSAD(const SADContext& context, const int pixelDx, con
             for (auto y = 0; y < context.blockSize; y++) {
                 const auto currentRow = (currentY0 + y) * context.stride + currentX0;
                 const auto referenceRow = (referenceY0 + y) * context.stride + referenceX0;
+                const auto* currentRRow = context.currentR + currentRow;
+                const auto* currentGRow = context.currentG + currentRow;
+                const auto* currentBRow = context.currentB + currentRow;
+                const auto* referenceRRow = context.referenceR + referenceRow;
+                const auto* referenceGRow = context.referenceG + referenceRow;
+                const auto* referenceBRow = context.referenceB + referenceRow;
                 for (auto x = 0; x < context.blockSize; x++) {
-                    const auto currentIndex = currentRow + x;
-                    const auto referenceIndex = referenceRow + x;
-                    sad += static_cast<int64_t>(std::llround((std::abs(context.currentR[currentIndex] - context.referenceR[referenceIndex]) +
-                                                              std::abs(context.currentG[currentIndex] - context.referenceG[referenceIndex]) +
-                                                              std::abs(context.currentB[currentIndex] - context.referenceB[referenceIndex])) * context.maxSample));
+                    const auto diff =
+                        static_cast<double>(std::abs(currentRRow[x] - referenceRRow[x]) +
+                                            std::abs(currentGRow[x] - referenceGRow[x]) +
+                                            std::abs(currentBRow[x] - referenceBRow[x]));
+                    sad += roundPositiveToInt64(diff * context.maxSample);
                 }
             }
         } else {
             for (auto y = 0; y < context.blockSize; y++) {
                 const auto currentRow = (currentY0 + y) * context.stride + currentX0;
                 const auto referenceRow = (referenceY0 + y) * context.stride + referenceX0;
+                const auto* currentLumaRow = context.currentLuma + currentRow;
+                const auto* referenceLumaRow = context.referenceLuma + referenceRow;
                 for (auto x = 0; x < context.blockSize; x++) {
-                    const auto currentIndex = currentRow + x;
-                    const auto referenceIndex = referenceRow + x;
-                    sad += static_cast<int64_t>(std::llround(std::abs(context.currentLuma[currentIndex] - context.referenceLuma[referenceIndex]) * context.maxSample));
+                    const auto diff = static_cast<double>(std::abs(currentLumaRow[x] - referenceLumaRow[x]));
+                    sad += roundPositiveToInt64(diff * context.maxSample);
                 }
             }
         }
@@ -701,11 +769,14 @@ static int64_t computeBlockSAD(const SADContext& context, const int pixelDx, con
             const auto referenceIndex = referenceY * context.stride + referenceX;
 
             if (context.useChroma) {
-                sad += static_cast<int64_t>(std::llround((std::abs(context.currentR[currentIndex] - context.referenceR[referenceIndex]) +
-                                                          std::abs(context.currentG[currentIndex] - context.referenceG[referenceIndex]) +
-                                                          std::abs(context.currentB[currentIndex] - context.referenceB[referenceIndex])) * context.maxSample));
+                const auto diff =
+                    static_cast<double>(std::abs(context.currentR[currentIndex] - context.referenceR[referenceIndex]) +
+                                        std::abs(context.currentG[currentIndex] - context.referenceG[referenceIndex]) +
+                                        std::abs(context.currentB[currentIndex] - context.referenceB[referenceIndex]));
+                sad += roundPositiveToInt64(diff * context.maxSample);
             } else {
-                sad += static_cast<int64_t>(std::llround(std::abs(context.currentLuma[currentIndex] - context.referenceLuma[referenceIndex]) * context.maxSample));
+                const auto diff = static_cast<double>(std::abs(context.currentLuma[currentIndex] - context.referenceLuma[referenceIndex]));
+                sad += roundPositiveToInt64(diff * context.maxSample);
             }
         }
     }
@@ -1194,15 +1265,29 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
 
             int64_t semaphoreWaitNs{};
+            int64_t localSemaphoreWaitNs{};
+            int64_t sharedSemaphoreWaitNs{};
+            FlowPerfBreakdown flowPerf{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
             const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
                                                           currentR, currentG, currentB, referenceR, referenceG, referenceB,
                                                           scratch.flow.data(), width, height, stride,
-                                                          d->perfStats ? &semaphoreWaitNs : nullptr);
+                                                          d->perfStats ? &semaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &localSemaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &flowPerf : nullptr);
             if (d->perfStats) {
                 accumulatePerfStat(d->perf->semaphoreWaitNs, semaphoreWaitNs);
+                accumulatePerfStat(d->perf->localSemaphoreWaitNs, localSemaphoreWaitNs);
+                accumulatePerfStat(d->perf->sharedSemaphoreWaitNs, sharedSemaphoreWaitNs);
                 accumulatePerfStat(d->perf->flowCalls, 1);
                 accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
+                accumulatePerfStat(d->perf->flowCpuPrepNs, flowPerf.cpuPrepNs);
+                accumulatePerfStat(d->perf->flowCommandRecordNs, flowPerf.commandRecordNs);
+                accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
+                accumulatePerfStat(d->perf->flowUnpackNs, flowPerf.unpackNs);
+                accumulatePerfStat(d->perf->flowExportDirectNs, flowPerf.exportDirectNs);
+                accumulatePerfStat(d->perf->flowExportResizeNs, flowPerf.exportResizeNs);
             }
             if (status != 0) {
                 vsapi->freeFrame(current);
@@ -1346,15 +1431,29 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
 
             int64_t semaphoreWaitNs{};
+            int64_t localSemaphoreWaitNs{};
+            int64_t sharedSemaphoreWaitNs{};
+            FlowPerfBreakdown flowPerf{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
             const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
                                                           currentR, currentG, currentB, referenceR, referenceG, referenceB,
                                                           scratch.flow.data(), width, height, stride,
-                                                          d->perfStats ? &semaphoreWaitNs : nullptr);
+                                                          d->perfStats ? &semaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &localSemaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &flowPerf : nullptr);
             if (d->perfStats) {
                 accumulatePerfStat(d->perf->semaphoreWaitNs, semaphoreWaitNs);
+                accumulatePerfStat(d->perf->localSemaphoreWaitNs, localSemaphoreWaitNs);
+                accumulatePerfStat(d->perf->sharedSemaphoreWaitNs, sharedSemaphoreWaitNs);
                 accumulatePerfStat(d->perf->flowCalls, 1);
                 accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
+                accumulatePerfStat(d->perf->flowCpuPrepNs, flowPerf.cpuPrepNs);
+                accumulatePerfStat(d->perf->flowCommandRecordNs, flowPerf.commandRecordNs);
+                accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
+                accumulatePerfStat(d->perf->flowUnpackNs, flowPerf.unpackNs);
+                accumulatePerfStat(d->perf->flowExportDirectNs, flowPerf.exportDirectNs);
+                accumulatePerfStat(d->perf->flowExportResizeNs, flowPerf.exportResizeNs);
             }
             if (status != 0) {
                 vsapi->freeFrame(current);
@@ -1630,6 +1729,8 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         auto gpuThread{ vsapi->mapGetIntSaturated(in, "gpu_thread", 0, &err) };
         if (err)
             gpuThread = 2;
+        auto sharedFlowInFlight{ vsapi->mapGetIntSaturated(in, "shared_flow_inflight", 0, &err) };
+        const auto sharedFlowInFlightSpecified = !err;
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
         if (err)
@@ -1721,6 +1822,13 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             if (fpsNum || fpsDen || factorNum != 2 || factorDen != 1)
                 throw "mv=True does not support factor_num, factor_den, fps_num, or fps_den";
 
+            if (!sharedFlowInFlightSpecified)
+                sharedFlowInFlight = queueCount;
+            if (sharedFlowInFlight < 1)
+                throw "shared_flow_inflight must be greater than 0";
+            if (sharedFlowInFlight > queueCount)
+                std::cerr << "Warning: shared_flow_inflight is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
+
             d->factorNum = 1;
             d->factorDen = 1;
         } else if (fpsNum && fpsDen) {
@@ -1808,9 +1916,12 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             mvClip = nullptr;
         }
 
-        d->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        auto localFlowInFlight = gpuThread;
+        if (d->exportMotionVectors && sharedFlowInFlightSpecified)
+            localFlowInFlight = std::max(gpuThread, sharedFlowInFlight);
+        d->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
         if (d->exportMotionVectors)
-            d->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, queueCount);
+            d->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
 
         if (d->skip) {
             auto vmaf{ vsapi->getPluginByID("com.holywu.vmaf", core) };
@@ -1958,6 +2069,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         auto gpuThread{ vsapi->mapGetIntSaturated(in, "gpu_thread", 0, &err) };
         if (err)
             gpuThread = 2;
+        auto sharedFlowInFlight{ vsapi->mapGetIntSaturated(in, "shared_flow_inflight", 0, &err) };
+        const auto sharedFlowInFlightSpecified = !err;
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
         if (err)
@@ -2019,6 +2132,12 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto queueCount = std::max(1, static_cast<int>(ncnn::get_gpu_info(gpuId).compute_queue_count()));
         if (static_cast<uint32_t>(gpuThread) > static_cast<uint32_t>(queueCount))
             std::cerr << "Warning: gpu_thread is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
+        if (!sharedFlowInFlightSpecified)
+            sharedFlowInFlight = queueCount;
+        if (sharedFlowInFlight < 1)
+            throw "shared_flow_inflight must be greater than 0";
+        if (sharedFlowInFlight > queueCount)
+            std::cerr << "Warning: shared_flow_inflight is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
 
         if (gpuThread < 1)
             throw "gpu_thread must be greater than 0";
@@ -2066,8 +2185,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             mvClip = nullptr;
         }
 
-        pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
-        pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, queueCount);
+        const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
+        pairData->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
+        pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -2193,6 +2313,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         auto gpuThread{ vsapi->mapGetIntSaturated(in, "gpu_thread", 0, &err) };
         if (err)
             gpuThread = 2;
+        auto sharedFlowInFlight{ vsapi->mapGetIntSaturated(in, "shared_flow_inflight", 0, &err) };
+        const auto sharedFlowInFlightSpecified = !err;
         const auto perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
@@ -2251,6 +2373,12 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         const auto queueCount = std::max(1, static_cast<int>(ncnn::get_gpu_info(gpuId).compute_queue_count()));
         if (static_cast<uint32_t>(gpuThread) > static_cast<uint32_t>(queueCount))
             std::cerr << "Warning: gpu_thread is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
+        if (!sharedFlowInFlightSpecified)
+            sharedFlowInFlight = queueCount;
+        if (sharedFlowInFlight < 1)
+            throw "shared_flow_inflight must be greater than 0";
+        if (sharedFlowInFlight > queueCount)
+            std::cerr << "Warning: shared_flow_inflight is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
 
         if (gpuThread < 1)
             throw "gpu_thread must be greater than 0";
@@ -2301,8 +2429,9 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         }
 
         sourceNode = vsapi->addNodeRef(pairData->node);
-        pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
-        pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, queueCount);
+        const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
+        pairData->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
+        pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -2427,6 +2556,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
+                             "shared_flow_inflight:int:opt;"
                              "flow_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
                              "mv:int:opt;"
@@ -2454,6 +2584,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
+                             "shared_flow_inflight:int:opt;"
                              "flow_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
                              "perf_stats:int:opt;"
@@ -2477,6 +2608,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
+                             "shared_flow_inflight:int:opt;"
                              "flow_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
                              "perf_stats:int:opt;"
@@ -2499,6 +2631,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
+                             "shared_flow_inflight:int:opt;"
                              "flow_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
                              "perf_stats:int:opt;"
