@@ -59,7 +59,7 @@ clampPixel(v, limit) = min(max(v, 0), limit - 1)
 
 ### Direct flow path
 
-For normal export, a block vector is obtained from a full-resolution flow plane. Here, a flow plane is a per-pixel motion field at frame resolution. The block reduction is:
+For normal export, a block vector is obtained from a full-resolution flow plane. If `res_scale != 1.0`, RIFE first runs on the resized inference clip and the 4 flow channels are then bilinearly resized back to the source frame resolution before block reduction. Horizontal channels are additionally scaled by `sourceWidth / inferenceWidth` and vertical channels by `sourceHeight / inferenceHeight` so the exported flow is back in source-pixel units. After that normalization step, the block reduction is:
 
 - `center`: sample the flow at the block center `(blockX + blockSize / 2, blockY + blockSize / 2)`, edge-clamped
 - `average`: average all `blockSize * blockSize` flow samples covered by the block, with each sample position edge-clamped
@@ -97,7 +97,7 @@ pixelDy = round(vy / pel)
 
 ### Approximate displacement path
 
-For `RIFEMVApprox2/3`, each adjacent-pair flow field is first converted to pixel displacement, meaning motion measured directly in pixels:
+For `RIFEMVApprox2/3`, each adjacent-pair flow field is first converted to pixel displacement after that same source-resolution normalization step, meaning motion measured directly in source-frame pixels:
 
 ```text
 dispX = -2 * flowX

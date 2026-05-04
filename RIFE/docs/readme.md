@@ -42,7 +42,7 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 ### Signature
 
 ```python
-core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, mv=0, backward=1, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, blksize_int_x=None, blksize_int_y=None, sc=0, skip=0, skip_threshold=60.0)
+core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, mv=0, backward=1, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, sc=0, skip=0, skip_threshold=60.0)
 ```
 
 ### New or changed arguments
@@ -51,6 +51,14 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
   Scales the image before flow estimation and rescales vectors back to the original image coordinates. Smaller values can reduce cost and can sometimes behave better on large motion.
   `flow_scale` replaces the `uhd` bool parameter used in the original plugin. To match the old behavior, use `0.5` for uhd=True or `1.0` (default) for uhd=False.
   Accepted values are restricted to: `0.25`, `0.5`, `1.0`, `2.0`, `4.0`.
+
+- `res_scale`
+  MV-export-only clip-resize factor applied before RIFE flow inference.
+  Default: `1.0`.
+  The plugin rescales the RGBS inference clip to `round(width * res_scale)` by `round(height * res_scale)`, runs RIFE flow on that resized clip, then upsamples the exported flow back to the original clip resolution before block reduction, SAD computation, and MVTools export.
+  This means `blksize_x`, `blksize_y`, `overlap_x`, `overlap_y`, `hpad`, and `vpad` always operate on the original clip geometry, so a given block-size configuration always produces the same block grid regardless of `res_scale`.
+  Example: use `res_scale=0.5` to run a 2160p clip internally at about 1080p without changing MVTools block size.
+  `res_scale` is only accepted by `rife.RIFE` when `mv=1`.
 
 - `cpu_flow_resize`
   Debug control for the flow upsampling path used by motion-vector export.
@@ -129,13 +137,6 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
 - `chroma`
   If enabled, synthetic SAD includes all RGB channels. Otherwise it uses luma only.
 
-- `blksize_int_x`, `blksize_int_y`
-  MV-export-only internal block size used for inference reduction.
-  Defaults: `blksize_int_x=blksize_x`, `blksize_int_y=blksize_int_x`.
-  The plugin derives independent horizontal and vertical resize ratios from `blksize_int_x / blksize_x` and `blksize_int_y / blksize_y`, resizes the RGBS inference clip by those ratios, scales `overlap_x`, `overlap_y`, `hpad`, and `vpad` on their respective axes, and rejects the request if any derived internal width, height, overlap, or padding value would be non-integer.
-  Exported MVTools metadata and the dummy `Gray8` vector clip stay at the original clip resolution, and the exported vectors are scaled back up to that original coordinate space.
-  `blksize_int_x` and `blksize_int_y` are only accepted by `rife.RIFE` when `mv=1`.
-
 ### Typical single-direction export
 
 ```python
@@ -151,7 +152,7 @@ Use this mode when a function expects only one vector clip.
 ### Signature
 
 ```python
-mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, blksize_int_x=None, blksize_int_y=None)
+mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -241,8 +242,6 @@ bw1, fw1, bw2, fw2, bw3, fw3 = core.rife.RIFEMVApprox3(...)
 ### Shared arguments
 
 `RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it.
-
-`blksize_int_x` and `blksize_int_y` have the same meaning in `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3` as they do for `rife.RIFE(..., mv=1)`.
 
 ### Example with Degrain2
 
