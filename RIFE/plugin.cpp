@@ -3163,7 +3163,7 @@ static void VS_CC rifeMVApprox3Create(const VSMap* in, VSMap* out, [[maybe_unuse
 // Init
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
-    vspapi->configPlugin("com.holywu.rife", "rife", "Real-Time Intermediate Flow Estimation for Video Frame Interpolation",
+    vspapi->configPlugin("com.nmkd.rmv", "rmv", "Real-Time Intermediate Flow Estimation for Video Frame Interpolation",
                          VS_MAKE_VERSION(9, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
 
     vspapi->registerFunction("RIFE",
