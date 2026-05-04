@@ -32,7 +32,7 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 - MVTools usually operates on a different clip, often `YUV420P8`. `meta_clip` is still optional and can be used explicitly as the metadata source.
 - If the input is non-`RGBS` and `meta_clip` is omitted, the plugin now uses the original input clip as the metadata source automatically.
 - Vector clips are dummy `Gray8` clips whose pixel values are not meaningful. The motion data lives in frame properties.
-- Exported motion-vector frames also include `RIFEMV_AvgSad` as an integer frame property containing the raw average exported block SAD, `RIFEMV_AvgSad8x8` as an integer 8x8-equivalent average SAD in MVTools threshold space, plus `RIFEMV_AvgAbsDx`, `RIFEMV_AvgAbsDy`, and `RIFEMV_AvgAbsMotion` as float frame properties containing the average absolute horizontal motion, average absolute vertical motion, and average absolute motion magnitude for that frame.
+- Exported motion-vector frames also include `RMV_AvgSad` as an integer frame property containing the raw average exported block SAD, `RMV_AvgSad8x8` as an integer 8x8-equivalent average SAD in MVTools threshold space, plus `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, and `RMV_AvgAbsMotion` as float frame properties containing the average absolute horizontal motion, average absolute vertical motion, and average absolute motion magnitude for that frame.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
 ## API changes in `rmv.RIFE`
@@ -107,7 +107,7 @@ core.rmv.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mode
 - `sad_multiplier`
   Positive multiplier applied to the final synthetic SAD values written into exported MVTools vectors.
   Default: `1.0`.
-  This scales valid block SADs, invalid-frame sentinel SADs, and therefore `RIFEMV_AvgSad`.
+  This scales valid block SADs, invalid-frame sentinel SADs, and therefore `RMV_AvgSad`.
   It does not affect motion estimation or exported vector `x`/`y` components.
 
 - `meta_clip`
@@ -181,7 +181,7 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 `sad_multiplier` has the same meaning as in `rmv.RIFE(..., mv=1)`:
 - positive float, default `1.0`
 - scales exported synthetic SAD values only
-- does not affect vector estimation or `RIFEMV_AvgAbs*` properties
+- does not affect vector estimation or `RMV_AvgAbs*` properties
 
 ### Recommended usage
 

@@ -189,8 +189,8 @@ The exported `VECTOR.sad` values stored in `MVTools_vectors` remain raw block SA
 
 That means:
 
-- `RIFEMV_AvgSad` is the raw mean exported block SAD and will generally increase with larger blocks.
-- `RIFEMV_AvgSad8x8` is the same average converted back into the 8x8-equivalent threshold space used by MVTools user parameters. This is the property to compare across different block sizes when you want a more stable threshold-oriented metric.
+- `RMV_AvgSad` is the raw mean exported block SAD and will generally increase with larger blocks.
+- `RMV_AvgSad8x8` is the same average converted back into the 8x8-equivalent threshold space used by MVTools user parameters. This is the property to compare across different block sizes when you want a more stable threshold-oriented metric.
 
 Because MVTools performs its own block-size normalization internally, changing the actual exported `VECTOR.sad` values to an 8x8-equivalent scale would break downstream threshold behavior.
 
