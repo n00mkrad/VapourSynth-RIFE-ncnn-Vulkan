@@ -6,9 +6,8 @@
 
 The same `sad` formula is used in all vector-export paths:
 
-- `RIFE(..., mv=1)`: single-output vector export mode, producing either backward or forward vectors depending on `mv_backward`
-- `buildMVToolsVectorBlob()`: helper that converts one frame pair plus motion data into the binary MVTools vector blob, including `x`, `y`, and `sad` for each block
 - `RIFEMV()`: two-output API that returns both backward and forward vector clips
+- `buildMVToolsVectorBlob()`: helper that converts one frame pair plus motion data into the binary MVTools vector blob, including `x`, `y`, and `sad` for each block
 - `buildMotionVectorBlobFromConfig()`: thin wrapper that builds the same blob using a `MotionVectorConfig` settings object
 - `RIFEMVApprox2()` / `RIFEMVApprox3()`: approximate exporters for larger temporal distances, built by composing 2 or 3 adjacent motions
 - `buildMotionVectorBlobFromDisplacement()`: helper that builds the blob from already-composed pixel displacements instead of directly from raw flow

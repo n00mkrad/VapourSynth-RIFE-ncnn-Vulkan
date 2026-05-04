@@ -13,7 +13,6 @@
 #include "benchmark.h"
 
 #include "rife_preproc.comp.hex.h"
-#include "rife_postproc.comp.hex.h"
 #include "rife_v4_timestep.comp.hex.h"
 
 #include "rife_ops.h"
@@ -25,7 +24,6 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
 
     rife_preproc = 0;
-    rife_postproc = 0;
     rife_v4_timestep = 0;
     rife_flow_scale_image = 0;
     rife_flow_resize_flow = 0;
@@ -46,12 +44,8 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
 
 RIFE::~RIFE()
 {
-    // cleanup preprocess and postprocess pipeline
-    {
-        delete rife_preproc;
-        delete rife_postproc;
-        delete rife_v4_timestep;
-    }
+    delete rife_preproc;
+    delete rife_v4_timestep;
 
     if (use_flow_scale)
     {
@@ -278,37 +272,21 @@ int RIFE::load(const std::string& modeldir)
     opt.use_int8_storage = false;
 
     flownet.opt = opt;
-    contextnet.opt = opt;
-    fusionnet.opt = opt;
 
     flownet.set_vulkan_device(vkdev);
-    contextnet.set_vulkan_device(vkdev);
-    fusionnet.set_vulkan_device(vkdev);
 
     flownet.register_custom_layer("rife.Warp", Warp_layer_creator);
-    contextnet.register_custom_layer("rife.Warp", Warp_layer_creator);
-    fusionnet.register_custom_layer("rife.Warp", Warp_layer_creator);
 
 #if _WIN32
     load_param_model(flownet, modeldir, L"flownet");
-    if (!rife_v4)
-    {
-        load_param_model(contextnet, modeldir, L"contextnet");
-        load_param_model(fusionnet, modeldir, L"fusionnet");
-    }
 #else
     load_param_model(flownet, modeldir, "flownet");
-    if (!rife_v4)
-    {
-        load_param_model(contextnet, modeldir, "contextnet");
-        load_param_model(fusionnet, modeldir, "fusionnet");
-    }
 #endif
 
     if (rife_v4)
         rife_v4_flow_blob_name = detect_v4_flow_blob_name(flownet);
 
-    // initialize preprocess and postprocess pipeline
+    // initialize preprocess pipeline
     if (vkdev)
     {
         std::vector<ncnn::vk_specialization_type> specializations(1);
@@ -332,19 +310,6 @@ int RIFE::load(const std::string& modeldir)
             rife_preproc->create(spirv.data(), spirv.size() * 4, specializations);
         }
 
-        {
-            std::vector<uint32_t> spirv;
-            static ncnn::Mutex lock;
-            {
-                ncnn::MutexLockGuard guard(lock);
-                if (spirv.empty())
-                    compile_spirv_module(rife_postproc_comp_data, sizeof(rife_postproc_comp_data), opt, spirv);
-            }
-
-            rife_postproc = new ncnn::Pipeline(vkdev);
-            rife_postproc->set_optimal_local_size_xyz(8, 8, 3);
-            rife_postproc->create(spirv.data(), spirv.size() * 4, specializations);
-        }
     }
 
     if (use_flow_scale)
@@ -909,444 +874,6 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         vkdev->reclaim_blob_allocator(blob_vkallocator);
         vkdev->reclaim_staging_allocator(staging_vkallocator);
         return -1;
-    }
-
-    vkdev->reclaim_blob_allocator(blob_vkallocator);
-    vkdev->reclaim_staging_allocator(staging_vkallocator);
-
-    return 0;
-}
-
-int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
-                  const float* src1R, const float* src1G, const float* src1B,
-                  float* dstR, float* dstG, float* dstB,
-                  const int w, const int h, const ptrdiff_t stride, const float timestep) const
-{
-    if (rife_v4)
-        return process_v4(src0R, src0G, src0B, src1R, src1G, src1B, dstR, dstG, dstB, w, h, stride, timestep);
-
-    const int channels = 3;//in0image.elempack;
-
-//     fprintf(stderr, "%d x %d\n", w, h);
-
-    ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
-    ncnn::VkAllocator* staging_vkallocator = vkdev->acquire_staging_allocator();
-
-    ncnn::Option opt = flownet.opt;
-    opt.blob_vkallocator = blob_vkallocator;
-    opt.workspace_vkallocator = blob_vkallocator;
-    opt.staging_vkallocator = staging_vkallocator;
-
-    // pad to 32n
-    int w_padded = (w + padding - 1) / padding * padding;
-    int h_padded = (h + padding - 1) / padding * padding;
-
-    const size_t in_out_tile_elemsize = opt.use_fp16_storage ? 2u : 4u;
-
-    ncnn::Mat in0;
-    ncnn::Mat in1;
-    in0.create(w, h, channels, sizeof(float), 1);
-    in1.create(w, h, channels, sizeof(float), 1);
-    float* in0R{ in0.channel(0) };
-    float* in0G{ in0.channel(1) };
-    float* in0B{ in0.channel(2) };
-    float* in1R{ in1.channel(0) };
-    float* in1G{ in1.channel(1) };
-    float* in1B{ in1.channel(2) };
-    for (auto y{ 0 }; y < h; y++) {
-        for (auto x{ 0 }; x < w; x++) {
-            in0R[w * y + x] = src0R[stride * y + x] * 255.0f;
-            in0G[w * y + x] = src0G[stride * y + x] * 255.0f;
-            in0B[w * y + x] = src0B[stride * y + x] * 255.0f;
-            in1R[w * y + x] = src1R[stride * y + x] * 255.0f;
-            in1G[w * y + x] = src1G[stride * y + x] * 255.0f;
-            in1B[w * y + x] = src1B[stride * y + x] * 255.0f;
-        }
-    }
-
-    ncnn::VkCompute cmd(vkdev);
-
-    // upload
-    ncnn::VkMat in0_gpu;
-    ncnn::VkMat in1_gpu;
-    {
-        cmd.record_clone(in0, in0_gpu, opt);
-        cmd.record_clone(in1, in1_gpu, opt);
-    }
-
-    ncnn::VkMat out_gpu;
-
-    // preproc
-    ncnn::VkMat in0_gpu_padded;
-    ncnn::VkMat in1_gpu_padded;
-    {
-        in0_gpu_padded.create(w_padded, h_padded, 3, in_out_tile_elemsize, 1, blob_vkallocator);
-
-        std::vector<ncnn::VkMat> bindings(2);
-        bindings[0] = in0_gpu;
-        bindings[1] = in0_gpu_padded;
-
-        std::vector<ncnn::vk_constant_type> constants(6);
-        constants[0].i = in0_gpu.w;
-        constants[1].i = in0_gpu.h;
-        constants[2].i = in0_gpu.cstep;
-        constants[3].i = in0_gpu_padded.w;
-        constants[4].i = in0_gpu_padded.h;
-        constants[5].i = in0_gpu_padded.cstep;
-
-        cmd.record_pipeline(rife_preproc, bindings, constants, in0_gpu_padded);
-    }
-    {
-        in1_gpu_padded.create(w_padded, h_padded, 3, in_out_tile_elemsize, 1, blob_vkallocator);
-
-        std::vector<ncnn::VkMat> bindings(2);
-        bindings[0] = in1_gpu;
-        bindings[1] = in1_gpu_padded;
-
-        std::vector<ncnn::vk_constant_type> constants(6);
-        constants[0].i = in1_gpu.w;
-        constants[1].i = in1_gpu.h;
-        constants[2].i = in1_gpu.cstep;
-        constants[3].i = in1_gpu_padded.w;
-        constants[4].i = in1_gpu_padded.h;
-        constants[5].i = in1_gpu_padded.cstep;
-
-        cmd.record_pipeline(rife_preproc, bindings, constants, in1_gpu_padded);
-    }
-
-    // flownet
-    ncnn::VkMat flow;
-    ncnn::VkMat flow0;
-    ncnn::VkMat flow1;
-    {
-        ncnn::Extractor ex = flownet.create_extractor();
-        ex.set_blob_vkallocator(blob_vkallocator);
-        ex.set_workspace_vkallocator(blob_vkallocator);
-        ex.set_staging_vkallocator(staging_vkallocator);
-
-        if (use_flow_scale)
-        {
-            ncnn::VkMat in0_gpu_padded_downscaled;
-            ncnn::VkMat in1_gpu_padded_downscaled;
-            rife_flow_scale_image->forward(in0_gpu_padded, in0_gpu_padded_downscaled, cmd, opt);
-            rife_flow_scale_image->forward(in1_gpu_padded, in1_gpu_padded_downscaled, cmd, opt);
-
-            ex.input("input0", in0_gpu_padded_downscaled);
-            ex.input("input1", in1_gpu_padded_downscaled);
-
-            ncnn::VkMat flow_downscaled;
-            ex.extract("flow", flow_downscaled, cmd);
-
-            ncnn::VkMat flow_half;
-            rife_flow_resize_flow->forward(flow_downscaled, flow_half, cmd, opt);
-
-            rife_flow_scale_vectors->forward(flow_half, flow, cmd, opt);
-        }
-        else
-        {
-            ex.input("input0", in0_gpu_padded);
-            ex.input("input1", in1_gpu_padded);
-            ex.extract("flow", flow, cmd);
-        }
-    }
-
-    if (rife_v2)
-    {
-        std::vector<ncnn::VkMat> inputs(1);
-        inputs[0] = flow;
-        std::vector<ncnn::VkMat> outputs(2);
-        rife_v2_slice_flow->forward(inputs, outputs, cmd, opt);
-        flow0 = outputs[0];
-        flow1 = outputs[1];
-    }
-
-    // contextnet
-    ncnn::VkMat ctx0[4];
-    ncnn::VkMat ctx1[4];
-    {
-        ncnn::Extractor ex = contextnet.create_extractor();
-        ex.set_blob_vkallocator(blob_vkallocator);
-        ex.set_workspace_vkallocator(blob_vkallocator);
-        ex.set_staging_vkallocator(staging_vkallocator);
-
-        ex.input("input.1", in0_gpu_padded);
-        if (rife_v2)
-        {
-            ex.input("flow.0", flow0);
-        }
-        else
-        {
-            ex.input("flow.0", flow);
-        }
-        ex.extract("f1", ctx0[0], cmd);
-        ex.extract("f2", ctx0[1], cmd);
-        ex.extract("f3", ctx0[2], cmd);
-        ex.extract("f4", ctx0[3], cmd);
-    }
-    {
-        ncnn::Extractor ex = contextnet.create_extractor();
-        ex.set_blob_vkallocator(blob_vkallocator);
-        ex.set_workspace_vkallocator(blob_vkallocator);
-        ex.set_staging_vkallocator(staging_vkallocator);
-
-        ex.input("input.1", in1_gpu_padded);
-        if (rife_v2)
-        {
-            ex.input("flow.0", flow1);
-        }
-        else
-        {
-            ex.input("flow.1", flow);
-        }
-        ex.extract("f1", ctx1[0], cmd);
-        ex.extract("f2", ctx1[1], cmd);
-        ex.extract("f3", ctx1[2], cmd);
-        ex.extract("f4", ctx1[3], cmd);
-    }
-
-    // fusionnet
-    ncnn::VkMat out_gpu_padded;
-    {
-        ncnn::Extractor ex = fusionnet.create_extractor();
-        ex.set_blob_vkallocator(blob_vkallocator);
-        ex.set_workspace_vkallocator(blob_vkallocator);
-        ex.set_staging_vkallocator(staging_vkallocator);
-
-        ex.input("img0", in0_gpu_padded);
-        ex.input("img1", in1_gpu_padded);
-        ex.input("flow", flow);
-        ex.input("3", ctx0[0]);
-        ex.input("4", ctx0[1]);
-        ex.input("5", ctx0[2]);
-        ex.input("6", ctx0[3]);
-        ex.input("7", ctx1[0]);
-        ex.input("8", ctx1[1]);
-        ex.input("9", ctx1[2]);
-        ex.input("10", ctx1[3]);
-
-        in0_gpu.release();
-        in1_gpu.release();
-        ctx0[0].release();
-        ctx0[1].release();
-        ctx0[2].release();
-        ctx0[3].release();
-        ctx1[0].release();
-        ctx1[1].release();
-        ctx1[2].release();
-        ctx1[3].release();
-        flow.release();
-
-        ex.extract("output", out_gpu_padded, cmd);
-    }
-
-    out_gpu.create(w, h, channels, sizeof(float), 1, blob_vkallocator);
-
-    // postproc
-    {
-        std::vector<ncnn::VkMat> bindings(2);
-        bindings[0] = out_gpu_padded;
-        bindings[1] = out_gpu;
-
-        std::vector<ncnn::vk_constant_type> constants(6);
-        constants[0].i = out_gpu_padded.w;
-        constants[1].i = out_gpu_padded.h;
-        constants[2].i = out_gpu_padded.cstep;
-        constants[3].i = out_gpu.w;
-        constants[4].i = out_gpu.h;
-        constants[5].i = out_gpu.cstep;
-
-        cmd.record_pipeline(rife_postproc, bindings, constants, out_gpu);
-    }
-
-    // download
-    {
-        ncnn::Mat out;
-
-        cmd.record_clone(out_gpu, out, opt);
-
-        cmd.submit_and_wait();
-
-        const float* outR{ out.channel(0) };
-        const float* outG{ out.channel(1) };
-        const float* outB{ out.channel(2) };
-        for (auto y{ 0 }; y < h; y++) {
-            for (auto x{ 0 }; x < w; x++) {
-                dstR[stride * y + x] = outR[w * y + x] * (1 / 255.0f);
-                dstG[stride * y + x] = outG[w * y + x] * (1 / 255.0f);
-                dstB[stride * y + x] = outB[w * y + x] * (1 / 255.0f);
-            }
-        }
-    }
-
-    vkdev->reclaim_blob_allocator(blob_vkallocator);
-    vkdev->reclaim_staging_allocator(staging_vkallocator);
-
-    return 0;
-}
-
-int RIFE::process_v4(const float* src0R, const float* src0G, const float* src0B,
-                     const float* src1R, const float* src1G, const float* src1B,
-                     float* dstR, float* dstG, float* dstB,
-                     const int w, const int h, const ptrdiff_t stride, const float timestep) const
-{
-    const int channels = 3;//in0image.elempack;
-
-//     fprintf(stderr, "%d x %d\n", w, h);
-
-    ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
-    ncnn::VkAllocator* staging_vkallocator = vkdev->acquire_staging_allocator();
-
-    ncnn::Option opt = flownet.opt;
-    opt.blob_vkallocator = blob_vkallocator;
-    opt.workspace_vkallocator = blob_vkallocator;
-    opt.staging_vkallocator = staging_vkallocator;
-    // padding, the default is 32, but newer rife models require 64
-    // std::cout << "padding: " << padding << std::endl;
-    int w_padded = (w + padding - 1) / padding * padding;
-    int h_padded = (h + padding - 1) / padding * padding;
-    
-
-    const size_t in_out_tile_elemsize = opt.use_fp16_storage ? 2u : 4u;
-
-    ncnn::Mat in0;
-    ncnn::Mat in1;
-    in0.create(w, h, channels, sizeof(float), 1);
-    in1.create(w, h, channels, sizeof(float), 1);
-    float* in0R{ in0.channel(0) };
-    float* in0G{ in0.channel(1) };
-    float* in0B{ in0.channel(2) };
-    float* in1R{ in1.channel(0) };
-    float* in1G{ in1.channel(1) };
-    float* in1B{ in1.channel(2) };
-    for (auto y{ 0 }; y < h; y++) {
-        for (auto x{ 0 }; x < w; x++) {
-            in0R[w * y + x] = src0R[stride * y + x] * 255.0f;
-            in0G[w * y + x] = src0G[stride * y + x] * 255.0f;
-            in0B[w * y + x] = src0B[stride * y + x] * 255.0f;
-            in1R[w * y + x] = src1R[stride * y + x] * 255.0f;
-            in1G[w * y + x] = src1G[stride * y + x] * 255.0f;
-            in1B[w * y + x] = src1B[stride * y + x] * 255.0f;
-        }
-    }
-
-    ncnn::VkCompute cmd(vkdev);
-
-    // upload
-    ncnn::VkMat in0_gpu;
-    ncnn::VkMat in1_gpu;
-    {
-        cmd.record_clone(in0, in0_gpu, opt);
-        cmd.record_clone(in1, in1_gpu, opt);
-    }
-
-    ncnn::VkMat out_gpu;
-
-    {
-        // preproc
-        ncnn::VkMat in0_gpu_padded;
-        ncnn::VkMat in1_gpu_padded;
-        ncnn::VkMat timestep_gpu_padded;
-        {
-            in0_gpu_padded.create(w_padded, h_padded, 3, in_out_tile_elemsize, 1, blob_vkallocator);
-
-            std::vector<ncnn::VkMat> bindings(2);
-            bindings[0] = in0_gpu;
-            bindings[1] = in0_gpu_padded;
-
-            std::vector<ncnn::vk_constant_type> constants(6);
-            constants[0].i = in0_gpu.w;
-            constants[1].i = in0_gpu.h;
-            constants[2].i = in0_gpu.cstep;
-            constants[3].i = in0_gpu_padded.w;
-            constants[4].i = in0_gpu_padded.h;
-            constants[5].i = in0_gpu_padded.cstep;
-
-            cmd.record_pipeline(rife_preproc, bindings, constants, in0_gpu_padded);
-        }
-        {
-            in1_gpu_padded.create(w_padded, h_padded, 3, in_out_tile_elemsize, 1, blob_vkallocator);
-
-            std::vector<ncnn::VkMat> bindings(2);
-            bindings[0] = in1_gpu;
-            bindings[1] = in1_gpu_padded;
-
-            std::vector<ncnn::vk_constant_type> constants(6);
-            constants[0].i = in1_gpu.w;
-            constants[1].i = in1_gpu.h;
-            constants[2].i = in1_gpu.cstep;
-            constants[3].i = in1_gpu_padded.w;
-            constants[4].i = in1_gpu_padded.h;
-            constants[5].i = in1_gpu_padded.cstep;
-
-            cmd.record_pipeline(rife_preproc, bindings, constants, in1_gpu_padded);
-        }
-        {
-            timestep_gpu_padded.create(w_padded, h_padded, 1, in_out_tile_elemsize, 1, blob_vkallocator);
-
-            std::vector<ncnn::VkMat> bindings(1);
-            bindings[0] = timestep_gpu_padded;
-
-            std::vector<ncnn::vk_constant_type> constants(4);
-            constants[0].i = timestep_gpu_padded.w;
-            constants[1].i = timestep_gpu_padded.h;
-            constants[2].i = timestep_gpu_padded.cstep;
-            constants[3].f = timestep;
-
-            cmd.record_pipeline(rife_v4_timestep, bindings, constants, timestep_gpu_padded);
-        }
-
-        // flownet
-        ncnn::VkMat out_gpu_padded;
-        {
-            ncnn::Extractor ex = flownet.create_extractor();
-            ex.set_blob_vkallocator(blob_vkallocator);
-            ex.set_workspace_vkallocator(blob_vkallocator);
-            ex.set_staging_vkallocator(staging_vkallocator);
-
-            ex.input("in0", in0_gpu_padded);
-            ex.input("in1", in1_gpu_padded);
-            ex.input("in2", timestep_gpu_padded);
-            ex.extract("out0", out_gpu_padded, cmd);
-        }
-
-        out_gpu.create(w, h, channels, sizeof(float), 1, blob_vkallocator);
-
-        // postproc
-        {
-            std::vector<ncnn::VkMat> bindings(2);
-            bindings[0] = out_gpu_padded;
-            bindings[1] = out_gpu;
-
-            std::vector<ncnn::vk_constant_type> constants(6);
-            constants[0].i = out_gpu_padded.w;
-            constants[1].i = out_gpu_padded.h;
-            constants[2].i = out_gpu_padded.cstep;
-            constants[3].i = out_gpu.w;
-            constants[4].i = out_gpu.h;
-            constants[5].i = out_gpu.cstep;
-
-            cmd.record_pipeline(rife_postproc, bindings, constants, out_gpu);
-        }
-    }
-
-    // download
-    {
-        ncnn::Mat out;
-
-        cmd.record_clone(out_gpu, out, opt);
-
-        cmd.submit_and_wait();
-
-        const float* outR{ out.channel(0) };
-        const float* outG{ out.channel(1) };
-        const float* outB{ out.channel(2) };
-        for (auto y{ 0 }; y < h; y++) {
-            for (auto x{ 0 }; x < w; x++) {
-                dstR[stride * y + x] = outR[w * y + x] * (1 / 255.0f);
-                dstG[stride * y + x] = outG[w * y + x] * (1 / 255.0f);
-                dstB[stride * y + x] = outB[w * y + x] * (1 / 255.0f);
-            }
-        }
     }
 
     vkdev->reclaim_blob_allocator(blob_vkallocator);

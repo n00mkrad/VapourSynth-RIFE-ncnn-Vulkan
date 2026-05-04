@@ -38,28 +38,15 @@ public:
     int load(const std::string& modeldir);
 #endif
 
-    int process(const float* src0R, const float* src0G, const float* src0B,
-                const float* src1R, const float* src1G, const float* src1B,
-                float* dstR, float* dstG, float* dstB,
-                const int w, const int h, const ptrdiff_t stride, const float timestep) const;
-
     int process_flow(const float* src0R, const float* src0G, const float* src0B,
                      const float* src1R, const float* src1G, const float* src1B,
                      float* flow, const int w, const int h, const ptrdiff_t stride,
                      FlowPerfBreakdown* perf = nullptr) const;
 
-    int process_v4(const float* src0R, const float* src0G, const float* src0B,
-                   const float* src1R, const float* src1G, const float* src1B,
-                   float* dstR, float* dstG, float* dstB,
-                   const int w, const int h, const ptrdiff_t stride, const float timestep) const;
-
 private:
     ncnn::VulkanDevice* vkdev;
     ncnn::Net flownet;
-    ncnn::Net contextnet;
-    ncnn::Net fusionnet;
     ncnn::Pipeline* rife_preproc;
-    ncnn::Pipeline* rife_postproc;
     ncnn::Pipeline* rife_v4_timestep;
     ncnn::Layer* rife_flow_scale_image;
     ncnn::Layer* rife_flow_resize_flow;

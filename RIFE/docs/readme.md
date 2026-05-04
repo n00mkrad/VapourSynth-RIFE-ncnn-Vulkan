@@ -1,18 +1,17 @@
 # About this modification
 
-This modified build of the VapourSynth RIFE plugin adds MVTools-compatible motion-vector export.
+This modified build of the VapourSynth RIFE plugin focuses on MVTools-compatible motion-vector export.
 
-Instead of only generating interpolated frames, the plugin can now export motion vectors in the same binary frame-property format used by MVTools:
+It exports motion vectors in the same binary frame-property format used by MVTools:
 
 - `MVTools_MVAnalysisData`
 - `MVTools_vectors`
 
 That makes it possible to feed RIFE-derived motion into MVTools consumers such as `mv.Mask`, `mv.Flow`, `mv.FlowBlur`, and, with suitable settings, degrain-style functions.
 
-## What this build adds
+Interpolation is no longer part of this fork. Use the unmodified upstream RIFE plugin when you want frame interpolation output.
 
-- `rmv.RIFE(..., mv=1)`
-  Exports a single MVTools vector clip, either backward or forward depending on `backward`.
+## What this build adds
 
 - `rmv.RIFEMV(...)`
   Returns both backward and forward vector clips at once.
@@ -23,6 +22,12 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 
 - `rmv.RIFEMVApprox3(...)`
   Returns approximate vectors for deltas 1, 2, and 3 by composing adjacent motions.
+
+## Migration from removed `rmv.RIFE`
+
+- `rmv.RIFE(...)` has been removed from this fork.
+- For interpolation, use the unmodified upstream RIFE plugin.
+- If you only need one direction, call `rmv.RIFEMV(...)` and use the output you need.
 
 ## Important limitations
 
@@ -35,30 +40,19 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 - Exported motion-vector frames also include `RMV_AvgSad` as an integer frame property containing the raw average exported block SAD, `RMV_AvgSad8x8` as an integer 8x8-equivalent average SAD in MVTools threshold space, plus `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, and `RMV_AvgAbsMotion` as float frame properties containing the average absolute horizontal motion, average absolute vertical motion, and average absolute motion magnitude for that frame.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
-## API changes in `rmv.RIFE`
-
-`rmv.RIFE` still performs normal interpolation, but it now also supports single-direction motion-vector export.
-
-### Signature
-
-```python
-core.rmv.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, mv=0, backward=1, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, sc=0, skip=0, skip_threshold=60.0)
-```
-
-### New or changed arguments
+## Shared motion-vector arguments
 
 - `flow_scale`
   Scales the image before flow estimation and rescales vectors back to the original image coordinates. Smaller values can reduce cost and can sometimes behave better on large motion.
-  `flow_scale` replaces the `uhd` bool parameter used in the original plugin. To match the old behavior, use `0.5` for uhd=True or `1.0` (default) for uhd=False.
+  `flow_scale` replaces the `uhd` bool parameter used in the original plugin. To match the old behavior, use `0.5` for `uhd=True` or `1.0` (default) for `uhd=False`.
   Accepted values are restricted to: `0.25`, `0.5`, `1.0`, `2.0`, `4.0`.
 
 - `res_scale`
-  MV-export-only clip-resize factor applied before RIFE flow inference.
+  Motion-vector clip-resize factor applied before RIFE flow inference.
   Default: `1.0`.
   The plugin rescales the RGBS inference clip to `round(width * res_scale)` by `round(height * res_scale)` and runs RIFE flow on that resized clip. Motion-vector reduction then happens on an internal block lattice derived from the inference size, and only the final block vectors are scaled back to original-image coordinates for SAD computation and MVTools export.
   This means `blksize_x`, `blksize_y`, `overlap_x`, `overlap_y`, `hpad`, and `vpad` always operate on the original clip geometry, so a given block-size configuration always produces the same block grid regardless of `res_scale`.
   Example: use `res_scale=0.5` to run a 2160p clip internally at about 1080p without changing MVTools block size.
-  `res_scale` is only accepted by `rmv.RIFE` when `mv=1`.
 
 - `cpu_flow_resize`
   Debug control for the internal resize path used by motion-vector export.
@@ -68,18 +62,10 @@ core.rmv.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mode
 
 - `shared_flow_inflight`
   Global in-flight cap for motion-vector flow inference shared across filter instances on the same GPU.
-  This only affects motion-vector paths (`mv=1`, `RIFEMV`, `RIFEMVApprox2`, `RIFEMVApprox3`).
+  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
   Default: GPU compute queue count.
   Lower values can reduce CPU contention; higher values can increase throughput on some setups.
   When explicitly set, local admission is relaxed to at least this value (`max(gpu_thread, shared_flow_inflight)`) so the shared cap remains the primary limiter.
-
-- `mv`
-  Enables MVTools vector export mode when set to `1`. In this mode, the output is a vector clip, not an interpolated image clip.
-
-- `backward`
-  Selects vector direction for `mv=1`.
-  `1` = backward vectors.
-  `0` = forward vectors.
 
 - `blksize_x`, `blksize_y`
   Exported MVTools block size on each axis.
@@ -94,7 +80,7 @@ core.rmv.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mode
   Default: `1`.
 
 - `delta`
-  Temporal distance written to `nDeltaFrame` in the MV metadata for single-output export.
+  Temporal distance written to `nDeltaFrame` in the MV metadata for `RIFEMV`.
   Default: `1`.
 
 - `bits`
@@ -137,14 +123,6 @@ core.rmv.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mode
 - `chroma`
   If enabled, synthetic SAD includes all RGB channels. Otherwise it uses luma only.
 
-### Typical single-direction export
-
-```python
-mvbw = core.rmv.RIFE(clip, model_path=rife_mdl, mv=1, backward=1, matrix_in_s="709", range_in_s="full")
-```
-
-Use this mode when a function expects only one vector clip.
-
 ## `rmv.RIFEMV`
 
 `rmv.RIFEMV` is the convenience function for the common delta-1 case.
@@ -166,7 +144,7 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - first output: backward vectors
 - second output: forward vectors
 
-`cpu_flow_resize` has the same meaning as in `rmv.RIFE`:
+`cpu_flow_resize`:
 - omitted = automatic (GPU resize with CPU fallback)
 - `0`/`False` = force GPU resize
 - `1`/`True` = force CPU resize
@@ -178,7 +156,7 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - `local_wait_ms` wait on per-filter `gpu_thread` limiter
 - `shared_wait_ms` wait on the cross-instance `shared_flow_inflight` limiter
 
-`sad_multiplier` has the same meaning as in `rmv.RIFE(..., mv=1)`:
+`sad_multiplier`:
 - positive float, default `1.0`
 - scales exported synthetic SAD values only
 - does not affect vector estimation or `RMV_AvgAbs*` properties
@@ -258,13 +236,13 @@ den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 - You can pass YUV clips directly; internal conversion to RGBS is done automatically for MV inference.
 - `meta_clip` is optional. For non-`RGBS` input it is auto-inferred from the original input clip when omitted; pass `meta_clip` explicitly only if you want a different metadata source.
 - Keep `pel`, `hpad`, and `vpad` consistent with the `mv.Super` clip you use downstream.
-- If a function only needs one direction, `rmv.RIFE(..., mv=1)` is enough.
+- If a function only needs one direction, call `rmv.RIFEMV(...)` and use either `mvbw` or `mvfw`.
 - If you need both directions for delta 1, prefer `rmv.RIFEMV(...)`.
 - If you need approximate delta 2 or 3 vectors, use `rmv.RIFEMVApprox2(...)` or `rmv.RIFEMVApprox3(...)`.
 
 ## Summary
 
-This modification turns RIFE into both an interpolator and a motion-vector source for MVTools workflows.
+This fork is now dedicated to exporting MVTools-compatible motion vectors from RIFE optical flow.
 
 The key idea is:
 
@@ -272,4 +250,4 @@ The key idea is:
 - MVTools still consumes its own vector-clip format
 - this build bridges the two by exporting MVTools-compatible binary vector properties
 
-That makes it possible to reuse RIFE optical flow in more traditional VapourSynth motion-processing pipelines.
+Use the upstream RIFE plugin for interpolation and this fork for MVTools workflows.
