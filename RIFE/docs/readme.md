@@ -11,17 +11,17 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 
 ## What this build adds
 
-- `rife.RIFE(..., mv=1)`
+- `rmv.RIFE(..., mv=1)`
   Exports a single MVTools vector clip, either backward or forward depending on `backward`.
 
-- `rife.RIFEMV(...)`
+- `rmv.RIFEMV(...)`
   Returns both backward and forward vector clips at once.
   The current implementation shares one inference pass per adjacent frame pair.
 
-- `rife.RIFEMVApprox2(...)`
+- `rmv.RIFEMVApprox2(...)`
   Returns approximate vectors for deltas 1 and 2 by composing adjacent motions.
 
-- `rife.RIFEMVApprox3(...)`
+- `rmv.RIFEMVApprox3(...)`
   Returns approximate vectors for deltas 1, 2, and 3 by composing adjacent motions.
 
 ## Important limitations
@@ -35,14 +35,14 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 - Exported motion-vector frames also include `RIFEMV_AvgSad` as an integer frame property containing the raw average exported block SAD, `RIFEMV_AvgSad8x8` as an integer 8x8-equivalent average SAD in MVTools threshold space, plus `RIFEMV_AvgAbsDx`, `RIFEMV_AvgAbsDy`, and `RIFEMV_AvgAbsMotion` as float frame properties containing the average absolute horizontal motion, average absolute vertical motion, and average absolute motion magnitude for that frame.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
-## API changes in `rife.RIFE`
+## API changes in `rmv.RIFE`
 
-`rife.RIFE` still performs normal interpolation, but it now also supports single-direction motion-vector export.
+`rmv.RIFE` still performs normal interpolation, but it now also supports single-direction motion-vector export.
 
 ### Signature
 
 ```python
-core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, mv=0, backward=1, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, sc=0, skip=0, skip_threshold=60.0)
+core.rmv.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, mv=0, backward=1, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, sc=0, skip=0, skip_threshold=60.0)
 ```
 
 ### New or changed arguments
@@ -58,7 +58,7 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
   The plugin rescales the RGBS inference clip to `round(width * res_scale)` by `round(height * res_scale)` and runs RIFE flow on that resized clip. Motion-vector reduction then happens on an internal block lattice derived from the inference size, and only the final block vectors are scaled back to original-image coordinates for SAD computation and MVTools export.
   This means `blksize_x`, `blksize_y`, `overlap_x`, `overlap_y`, `hpad`, and `vpad` always operate on the original clip geometry, so a given block-size configuration always produces the same block grid regardless of `res_scale`.
   Example: use `res_scale=0.5` to run a 2160p clip internally at about 1080p without changing MVTools block size.
-  `res_scale` is only accepted by `rife.RIFE` when `mv=1`.
+  `res_scale` is only accepted by `rmv.RIFE` when `mv=1`.
 
 - `cpu_flow_resize`
   Debug control for the internal resize path used by motion-vector export.
@@ -140,19 +140,19 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
 ### Typical single-direction export
 
 ```python
-mvbw = core.rife.RIFE(clip, model_path=rife_mdl, mv=1, backward=1, matrix_in_s="709", range_in_s="full")
+mvbw = core.rmv.RIFE(clip, model_path=rife_mdl, mv=1, backward=1, matrix_in_s="709", range_in_s="full")
 ```
 
 Use this mode when a function expects only one vector clip.
 
-## `rife.RIFEMV`
+## `rmv.RIFEMV`
 
-`rife.RIFEMV` is the convenience function for the common delta-1 case.
+`rmv.RIFEMV` is the convenience function for the common delta-1 case.
 
 ### Signature
 
 ```python
-mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -160,13 +160,13 @@ mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thre
 `RIFEMV` returns `clip:vnode[]` with this ordering:
 
 ```python
-mvbw, mvfw = core.rife.RIFEMV(...)
+mvbw, mvfw = core.rmv.RIFEMV(...)
 ```
 
 - first output: backward vectors
 - second output: forward vectors
 
-`cpu_flow_resize` has the same meaning as in `rife.RIFE`:
+`cpu_flow_resize` has the same meaning as in `rmv.RIFE`:
 - omitted = automatic (GPU resize with CPU fallback)
 - `0`/`False` = force GPU resize
 - `1`/`True` = force CPU resize
@@ -178,7 +178,7 @@ mvbw, mvfw = core.rife.RIFEMV(...)
 - `local_wait_ms` wait on per-filter `gpu_thread` limiter
 - `shared_wait_ms` wait on the cross-instance `shared_flow_inflight` limiter
 
-`sad_multiplier` has the same meaning as in `rife.RIFE(..., mv=1)`:
+`sad_multiplier` has the same meaning as in `rmv.RIFE(..., mv=1)`:
 - positive float, default `1.0`
 - scales exported synthetic SAD values only
 - does not affect vector estimation or `RIFEMV_AvgAbs*` properties
@@ -186,7 +186,7 @@ mvbw, mvfw = core.rife.RIFEMV(...)
 ### Recommended usage
 
 ```python
-mvbw, mvfw = core.rife.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 
 mask = core.mv.Mask(clip, mvfw, kind=5, ml=100.0)
 ```
@@ -195,14 +195,14 @@ mask = core.mv.Mask(clip, mvfw, kind=5, ml=100.0)
 
 ```python
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
-mvbw, mvfw = core.rife.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full", pel=1, hpad=0, vpad=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full", pel=1, hpad=0, vpad=0)
 
 den = core.mv.Degrain1(clip, sup, mvbw, mvfw, thsad=500)
 ```
 
 When using MVTools consumers that depend on `pel`, `hpad`, or `vpad`, keep those values aligned between `mv.Super(...)` and the RIFE exporter.
 
-## `rife.RIFEMVApprox2` and `rife.RIFEMVApprox3`
+## `rmv.RIFEMVApprox2` and `rmv.RIFEMVApprox3`
 
 These functions generate approximate larger-delta motion by composing adjacent frame-to-frame displacements.
 
@@ -211,13 +211,13 @@ They are useful when you want delta-2 or delta-3 vectors without running separat
 ### `RIFEMVApprox2`
 
 ```python
-outputs = core.rife.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+outputs = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 ```
 
 Output order:
 
 ```python
-bw1, fw1, bw2, fw2 = core.rife.RIFEMVApprox2(...)
+bw1, fw1, bw2, fw2 = core.rmv.RIFEMVApprox2(...)
 ```
 
 - `bw1`, `fw1`: approximate delta-1 vectors
@@ -226,13 +226,13 @@ bw1, fw1, bw2, fw2 = core.rife.RIFEMVApprox2(...)
 ### `RIFEMVApprox3`
 
 ```python
-outputs = core.rife.RIFEMVApprox3(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+outputs = core.rmv.RIFEMVApprox3(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 ```
 
 Output order:
 
 ```python
-bw1, fw1, bw2, fw2, bw3, fw3 = core.rife.RIFEMVApprox3(...)
+bw1, fw1, bw2, fw2, bw3, fw3 = core.rmv.RIFEMVApprox3(...)
 ```
 
 - `bw1`, `fw1`: approximate delta-1 vectors
@@ -247,7 +247,7 @@ bw1, fw1, bw2, fw2, bw3, fw3 = core.rife.RIFEMVApprox3(...)
 
 ```python
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
-bw1, fw1, bw2, fw2 = core.rife.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+bw1, fw1, bw2, fw2 = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
 
 den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 ```
@@ -258,9 +258,9 @@ den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 - You can pass YUV clips directly; internal conversion to RGBS is done automatically for MV inference.
 - `meta_clip` is optional. For non-`RGBS` input it is auto-inferred from the original input clip when omitted; pass `meta_clip` explicitly only if you want a different metadata source.
 - Keep `pel`, `hpad`, and `vpad` consistent with the `mv.Super` clip you use downstream.
-- If a function only needs one direction, `rife.RIFE(..., mv=1)` is enough.
-- If you need both directions for delta 1, prefer `rife.RIFEMV(...)`.
-- If you need approximate delta 2 or 3 vectors, use `rife.RIFEMVApprox2(...)` or `rife.RIFEMVApprox3(...)`.
+- If a function only needs one direction, `rmv.RIFE(..., mv=1)` is enough.
+- If you need both directions for delta 1, prefer `rmv.RIFEMV(...)`.
+- If you need approximate delta 2 or 3 vectors, use `rmv.RIFEMVApprox2(...)` or `rmv.RIFEMVApprox3(...)`.
 
 ## Summary
 

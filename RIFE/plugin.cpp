@@ -248,7 +248,7 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto composeNs = stats.composeNs.load(std::memory_order_relaxed);
 
     std::cerr << std::fixed << std::setprecision(3);
-    std::cerr << "[rife] perf_stats summary (" << label << ")\n";
+    std::cerr << "[rmv] perf_stats summary (" << label << ")\n";
     std::cerr << "  pair_frames=" << pairFrames
               << " pair_total_ms=" << nsToMs(pairTotalNs)
               << " pair_avg_ms=" << (pairFrames > 0 ? nsToMs(pairTotalNs) / pairFrames : 0.0) << '\n';
@@ -303,7 +303,7 @@ static void printMotionVectorInvocation(const char* const functionName, const in
                                         const bool includeDelta) {
     std::ostringstream message;
     message << std::boolalpha
-            << "[rife] " << functionName << " parameters: gpu_id=" << gpuId
+            << "[rmv] " << functionName << " parameters: gpu_id=" << gpuId
             << " gpu_thread=" << gpuThread
             << " shared_flow_inflight=" << sharedFlowInFlight
             << " flow_scale=" << flowScale
