@@ -59,10 +59,10 @@ clampPixel(v, limit) = min(max(v, 0), limit - 1)
 
 ### Direct flow path
 
-For normal export, a block vector is obtained from a full-resolution flow plane. If `res_scale != 1.0`, RIFE first runs on the resized inference clip and the 4 flow channels are then bilinearly resized back to the source frame resolution before block reduction. Horizontal channels are additionally scaled by `sourceWidth / inferenceWidth` and vertical channels by `sourceHeight / inferenceHeight` so the exported flow is back in source-pixel units. After that normalization step, the block reduction is:
+For normal export, a block vector is obtained by reducing the flow plane on the inference lattice. If `res_scale != 1.0`, RIFE runs on the resized inference clip and the block reduction uses an internal block geometry derived from that inference size. After reduction, horizontal motion is scaled by `sourceWidth / inferenceWidth` and vertical motion by `sourceHeight / inferenceHeight` so the exported vectors are back in source-pixel units. The block reduction is:
 
-- `center`: sample the flow at the block center `(blockX + blockSize / 2, blockY + blockSize / 2)`, edge-clamped
-- `average`: average all `blockSize * blockSize` flow samples covered by the block, with each sample position edge-clamped
+- `center`: sample the flow at the internal block center `(internalBlockX + internalBlockSizeX / 2, internalBlockY + internalBlockSizeY / 2)`, edge-clamped
+- `average`: average all `internalBlockSizeX * internalBlockSizeY` flow samples covered by the internal block, with each sample position edge-clamped
 
 Channel selection in the 4-channel exported flow tensor is:
 
@@ -72,8 +72,8 @@ Channel selection in the 4-channel exported flow tensor is:
 The exported vector components are:
 
 ```text
-vx = round(-2 * flowX * pel)
-vy = round(-2 * flowY * pel)
+vx = round(-2 * flowX * (sourceWidth  / inferenceWidth)  * pel)
+vy = round(-2 * flowY * (sourceHeight / inferenceHeight) * pel)
 ```
 
 They are then clamped so the referenced block stays within the padded analysis area. In other words, the chosen vector is limited so that the motion-shifted block cannot move beyond the configured padded bounds:
@@ -97,7 +97,7 @@ pixelDy = round(vy / pel)
 
 ### Approximate displacement path
 
-For `RIFEMVApprox2/3`, each adjacent-pair flow field is first converted to pixel displacement after that same source-resolution normalization step, meaning motion measured directly in source-frame pixels:
+For `RIFEMVApprox2/3`, each adjacent-pair flow field is first converted to displacement on the inference lattice, meaning motion measured directly in inference-frame pixels:
 
 ```text
 dispX = -2 * flowX
@@ -119,7 +119,7 @@ for each later field i:
 
 The bilinear sampler clamps sample coordinates to the frame before interpolation. Here `sampleX` and `sampleY` are floating-point lookup positions reached by following the already-composed motion.
 
-Block reduction is then applied directly to `composedX` and `composedY`, producing pixel-space motion. `pixelBlockDx` and `pixelBlockDy` mean the reduced horizontal and vertical block displacements measured in pixels. Exported vectors are:
+Block reduction is then applied directly to `composedX` and `composedY` on the inference lattice. The reduced block displacement is then scaled back to source-pixel units before export. `pixelBlockDx` and `pixelBlockDy` mean the reduced horizontal and vertical block displacements measured in source pixels after scaling. Exported vectors are:
 
 ```text
 vx = round(pixelBlockDx * pel)

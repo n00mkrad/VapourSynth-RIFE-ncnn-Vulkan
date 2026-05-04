@@ -74,7 +74,6 @@ struct MotionVectorPerfStats final {
 
 struct MotionVectorScratchBuffers final {
     std::vector<float> flow;
-    std::vector<float> resizedFlow;
     std::vector<float> currentLuma;
     std::vector<float> referenceLuma;
     std::vector<float> backwardDisplacement;
@@ -156,18 +155,45 @@ struct MotionVectorConfig final {
     int overlapY;
     int stepX;
     int stepY;
+    int internalBlockSizeX;
+    int internalBlockSizeY;
+    int internalOverlapX;
+    int internalOverlapY;
+    int internalStepX;
+    int internalStepY;
     int pel;
     int delta;
     int bits;
     int hPadding;
     int vPadding;
+    int internalHPadding;
+    int internalVPadding;
     int blkX;
     int blkY;
+    int inferenceWidth;
+    int inferenceHeight;
     int blockReduce;
+    float motionScaleX;
+    float motionScaleY;
     double sadMultiplier;
     int64_t invalidSad;
     MVAnalysisData backwardAnalysisData;
     MVAnalysisData forwardAnalysisData;
+};
+
+struct MotionVectorInternalGeometry final {
+    float motionScaleX;
+    float motionScaleY;
+    int inferenceWidth;
+    int inferenceHeight;
+    int internalBlockSizeX;
+    int internalBlockSizeY;
+    int internalOverlapX;
+    int internalOverlapY;
+    int internalStepX;
+    int internalStepY;
+    int internalHPadding;
+    int internalVPadding;
 };
 
 struct ResolvedRIFEModel final {
@@ -450,6 +476,7 @@ static int clampMotionVectorComponent(const int value, const int pel, const int 
 }
 
 static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, const VSVideoInfo* const metadataVi,
+                                                   const MotionVectorInternalGeometry& internalGeometry,
                                                    const bool useChroma, const int blockSizeX, const int blockSizeY,
                                                    const int overlapX, const int overlapY,
                                                    const int pel, const int delta, const int bits, const int hPadding,
@@ -463,14 +490,26 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
     config.overlapY = overlapY;
     config.stepX = blockSizeX - overlapX;
     config.stepY = blockSizeY - overlapY;
+    config.internalBlockSizeX = internalGeometry.internalBlockSizeX;
+    config.internalBlockSizeY = internalGeometry.internalBlockSizeY;
+    config.internalOverlapX = internalGeometry.internalOverlapX;
+    config.internalOverlapY = internalGeometry.internalOverlapY;
+    config.internalStepX = internalGeometry.internalStepX;
+    config.internalStepY = internalGeometry.internalStepY;
     config.pel = pel;
     config.delta = delta;
     config.bits = bits;
     config.hPadding = hPadding;
     config.vPadding = vPadding;
+    config.internalHPadding = internalGeometry.internalHPadding;
+    config.internalVPadding = internalGeometry.internalVPadding;
     config.blkX = computeBlockCount(inputVi.width, blockSizeX, overlapX, hPadding);
     config.blkY = computeBlockCount(inputVi.height, blockSizeY, overlapY, vPadding);
+    config.inferenceWidth = internalGeometry.inferenceWidth;
+    config.inferenceHeight = internalGeometry.inferenceHeight;
     config.blockReduce = blockReduce;
+    config.motionScaleX = internalGeometry.motionScaleX;
+    config.motionScaleY = internalGeometry.motionScaleY;
     config.sadMultiplier = sadMultiplier;
 
     const auto scaleLimit = static_cast<long double>((1LL << bits) - 1LL);
@@ -632,6 +671,35 @@ static int computeInferenceDimension(const int sourceDimension, const float resS
         throw std::runtime_error(std::string("res_scale results in an overflowed ") + name);
 
     return static_cast<int>(rounded);
+}
+
+static int scaleMotionVectorGeometryValue(const int value, const float scale) noexcept {
+    return static_cast<int>(std::lround(static_cast<double>(value) * static_cast<double>(scale)));
+}
+
+static MotionVectorInternalGeometry createMotionVectorInternalGeometry(const int sourceWidth, const int sourceHeight,
+                                                                      const int inferenceWidth, const int inferenceHeight,
+                                                                      const int blockSizeX, const int blockSizeY,
+                                                                      const int overlapX, const int overlapY,
+                                                                      const int hPadding, const int vPadding) noexcept {
+    MotionVectorInternalGeometry geometry{};
+    const auto scaleX = static_cast<float>(inferenceWidth) / static_cast<float>(sourceWidth);
+    const auto scaleY = static_cast<float>(inferenceHeight) / static_cast<float>(sourceHeight);
+
+    geometry.motionScaleX = static_cast<float>(sourceWidth) / static_cast<float>(inferenceWidth);
+    geometry.motionScaleY = static_cast<float>(sourceHeight) / static_cast<float>(inferenceHeight);
+    geometry.inferenceWidth = inferenceWidth;
+    geometry.inferenceHeight = inferenceHeight;
+
+    geometry.internalBlockSizeX = std::max(1, scaleMotionVectorGeometryValue(blockSizeX, scaleX));
+    geometry.internalBlockSizeY = std::max(1, scaleMotionVectorGeometryValue(blockSizeY, scaleY));
+    geometry.internalOverlapX = std::clamp(scaleMotionVectorGeometryValue(overlapX, scaleX), 0, geometry.internalBlockSizeX - 1);
+    geometry.internalOverlapY = std::clamp(scaleMotionVectorGeometryValue(overlapY, scaleY), 0, geometry.internalBlockSizeY - 1);
+    geometry.internalStepX = std::max(1, geometry.internalBlockSizeX - geometry.internalOverlapX);
+    geometry.internalStepY = std::max(1, geometry.internalBlockSizeY - geometry.internalOverlapY);
+    geometry.internalHPadding = std::max(0, scaleMotionVectorGeometryValue(hPadding, scaleX));
+    geometry.internalVPadding = std::max(0, scaleMotionVectorGeometryValue(vPadding, scaleY));
+    return geometry;
 }
 
 static void validateSadMultiplier(const double sadMultiplier) {
@@ -875,13 +943,23 @@ struct RIFEData final {
     int mvOverlapY;
     int mvStepX;
     int mvStepY;
+    int mvInternalBlockSizeX;
+    int mvInternalBlockSizeY;
+    int mvInternalOverlapX;
+    int mvInternalOverlapY;
+    int mvInternalStepX;
+    int mvInternalStepY;
     int mvPel;
     int mvBits;
     int mvHPadding;
     int mvVPadding;
+    int mvInternalHPadding;
+    int mvInternalVPadding;
     int mvBlkX;
     int mvBlkY;
     int mvBlockReduce;
+    float mvMotionScaleX;
+    float mvMotionScaleY;
     double mvSadMultiplier;
     int64_t mvInvalidSad;
     MVAnalysisData mvAnalysisData;
@@ -944,22 +1022,22 @@ struct RIFEMVApproxOutputData final {
 static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
                              const int blockX, const int blockY, const RIFEData* const VS_RESTRICT d) noexcept {
     if (d->mvBlockReduce == MVBlockReduceCenter) {
-        const auto sampleY = clampPixel(blockY + d->mvBlockSizeY / 2, height);
-        const auto sampleX = clampPixel(blockX + d->mvBlockSizeX / 2, width);
+        const auto sampleY = clampPixel(blockY + d->mvInternalBlockSizeY / 2, height);
+        const auto sampleX = clampPixel(blockX + d->mvInternalBlockSizeX / 2, width);
 
         return flowPlane[sampleY * width + sampleX];
     }
 
     double sum{};
-    for (auto y = 0; y < d->mvBlockSizeY; y++) {
+    for (auto y = 0; y < d->mvInternalBlockSizeY; y++) {
         const auto sampleY = clampPixel(blockY + y, height);
-        for (auto x = 0; x < d->mvBlockSizeX; x++) {
+        for (auto x = 0; x < d->mvInternalBlockSizeX; x++) {
             const auto sampleX = clampPixel(blockX + x, width);
             sum += flowPlane[sampleY * width + sampleX];
         }
     }
 
-    return static_cast<float>(sum / static_cast<double>(d->mvBlockSizeX * d->mvBlockSizeY));
+    return static_cast<float>(sum / static_cast<double>(d->mvInternalBlockSizeX * d->mvInternalBlockSizeY));
 }
 
 struct SADContext final {
@@ -1192,14 +1270,16 @@ static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VS
 
     for (auto by = 0; by < d->mvBlkY; by++) {
         const auto blockY = by * d->mvStepY - d->mvVPadding;
+        const auto internalBlockY = by * d->mvInternalStepY - d->mvInternalVPadding;
         for (auto bx = 0; bx < d->mvBlkX; bx++) {
             const auto blockX = bx * d->mvStepX - d->mvHPadding;
+            const auto internalBlockX = bx * d->mvInternalStepX - d->mvInternalHPadding;
             auto& vector = vectors[static_cast<size_t>(by) * d->mvBlkX + bx];
-            const auto flowX = reduceBlockFlow(flowXPlane, flowWidth, flowHeight, blockX, blockY, d);
-            const auto flowY = reduceBlockFlow(flowYPlane, flowWidth, flowHeight, blockX, blockY, d);
+            const auto flowX = reduceBlockFlow(flowXPlane, flowWidth, flowHeight, internalBlockX, internalBlockY, d);
+            const auto flowY = reduceBlockFlow(flowYPlane, flowWidth, flowHeight, internalBlockX, internalBlockY, d);
 
-            vector.x = static_cast<int>(std::lround(-2.0f * flowX * d->mvPel));
-            vector.y = static_cast<int>(std::lround(-2.0f * flowY * d->mvPel));
+            vector.x = static_cast<int>(std::lround(-2.0f * flowX * d->mvMotionScaleX * d->mvPel));
+            vector.y = static_cast<int>(std::lround(-2.0f * flowY * d->mvMotionScaleY * d->mvPel));
             vector.x = clampMotionVectorComponent(vector.x, d->mvPel, blockX, d->mvBlockSizeX, width, d->mvHPadding);
             vector.y = clampMotionVectorComponent(vector.y, d->mvPel, blockY, d->mvBlockSizeY, height, d->mvVPadding);
             const auto pixelDx = static_cast<int>(std::lround(static_cast<double>(vector.x) / d->mvPel));
@@ -1219,13 +1299,23 @@ static void applyMotionVectorConfig(RIFEData& d, const MotionVectorConfig& confi
     d.mvOverlapY = config.overlapY;
     d.mvStepX = config.stepX;
     d.mvStepY = config.stepY;
+    d.mvInternalBlockSizeX = config.internalBlockSizeX;
+    d.mvInternalBlockSizeY = config.internalBlockSizeY;
+    d.mvInternalOverlapX = config.internalOverlapX;
+    d.mvInternalOverlapY = config.internalOverlapY;
+    d.mvInternalStepX = config.internalStepX;
+    d.mvInternalStepY = config.internalStepY;
     d.mvPel = config.pel;
     d.mvBits = config.bits;
     d.mvHPadding = config.hPadding;
     d.mvVPadding = config.vPadding;
+    d.mvInternalHPadding = config.internalHPadding;
+    d.mvInternalVPadding = config.internalVPadding;
     d.mvBlkX = config.blkX;
     d.mvBlkY = config.blkY;
     d.mvBlockReduce = config.blockReduce;
+    d.mvMotionScaleX = config.motionScaleX;
+    d.mvMotionScaleY = config.motionScaleY;
     d.mvSadMultiplier = config.sadMultiplier;
     d.mvInvalidSad = config.invalidSad;
 }
@@ -1270,89 +1360,6 @@ static float sampleBilinearPlane(const float* data, const int width, const int h
     const auto bottom = data[row1 + x0] * (1.0f - alpha) + data[row1 + x1] * alpha;
 
     return top * (1.0f - beta) + bottom * beta;
-}
-
-struct FlowResizeAxisEntry final {
-    int index0;
-    int index1;
-    float alpha;
-};
-
-static void buildFlowResizeAxisTable(const int srcSize, const int dstSize,
-                                     std::vector<FlowResizeAxisEntry>& table) {
-    table.resize(dstSize);
-    const auto scale = static_cast<float>(srcSize) / static_cast<float>(dstSize);
-    for (int i = 0; i < dstSize; i++) {
-        auto sample = (static_cast<float>(i) + 0.5f) * scale - 0.5f;
-        sample = std::max(0.0f, std::min(sample, static_cast<float>(srcSize - 1)));
-        const auto i0 = static_cast<int>(std::floor(sample));
-        const auto i1 = std::min(i0 + 1, srcSize - 1);
-        table[i] = { i0, i1, sample - static_cast<float>(i0) };
-    }
-}
-
-static void resizeAndScaleFlow(const float* inputFlow, const int inputWidth, const int inputHeight,
-                               float* outputFlow, const int outputWidth, const int outputHeight) {
-    const auto inputPlaneSize = static_cast<size_t>(inputWidth) * inputHeight;
-    const auto outputPlaneSize = static_cast<size_t>(outputWidth) * outputHeight;
-    if (inputWidth == outputWidth && inputHeight == outputHeight) {
-        std::memcpy(outputFlow, inputFlow, outputPlaneSize * 4 * sizeof(float));
-        return;
-    }
-
-    struct AxisCache final {
-        int srcWidth{};
-        int srcHeight{};
-        int dstWidth{};
-        int dstHeight{};
-        std::vector<FlowResizeAxisEntry> xTable;
-        std::vector<FlowResizeAxisEntry> yTable;
-    };
-    static thread_local AxisCache axisCache;
-    if (axisCache.srcWidth != inputWidth || axisCache.srcHeight != inputHeight ||
-        axisCache.dstWidth != outputWidth || axisCache.dstHeight != outputHeight) {
-        axisCache.srcWidth = inputWidth;
-        axisCache.srcHeight = inputHeight;
-        axisCache.dstWidth = outputWidth;
-        axisCache.dstHeight = outputHeight;
-        buildFlowResizeAxisTable(inputWidth, outputWidth, axisCache.xTable);
-        buildFlowResizeAxisTable(inputHeight, outputHeight, axisCache.yTable);
-    }
-
-    const auto xScale = static_cast<float>(outputWidth) / static_cast<float>(inputWidth);
-    const auto yScale = static_cast<float>(outputHeight) / static_cast<float>(inputHeight);
-    for (int channel = 0; channel < 4; channel++) {
-        const auto* srcPlane = inputFlow + static_cast<size_t>(channel) * inputPlaneSize;
-        auto* dstPlane = outputFlow + static_cast<size_t>(channel) * outputPlaneSize;
-        const auto motionScale = (channel == 0 || channel == 2) ? xScale : yScale;
-
-        for (int y = 0; y < outputHeight; y++) {
-            const auto& yEntry = axisCache.yTable[y];
-            const auto row0 = static_cast<size_t>(yEntry.index0) * inputWidth;
-            const auto row1 = static_cast<size_t>(yEntry.index1) * inputWidth;
-            for (int x = 0; x < outputWidth; x++) {
-                const auto& xEntry = axisCache.xTable[x];
-                const auto top = srcPlane[row0 + xEntry.index0] * (1.0f - xEntry.alpha) +
-                                 srcPlane[row0 + xEntry.index1] * xEntry.alpha;
-                const auto bottom = srcPlane[row1 + xEntry.index0] * (1.0f - xEntry.alpha) +
-                                    srcPlane[row1 + xEntry.index1] * xEntry.alpha;
-                dstPlane[static_cast<size_t>(y) * outputWidth + x] =
-                    (top * (1.0f - yEntry.alpha) + bottom * yEntry.alpha) * motionScale;
-            }
-        }
-    }
-}
-
-static const float* normalizeFlowForExport(MotionVectorScratchBuffers& scratch,
-                                           const int inferenceWidth, const int inferenceHeight,
-                                           const int sourceWidth, const int sourceHeight) {
-    if (inferenceWidth == sourceWidth && inferenceHeight == sourceHeight)
-        return scratch.flow.data();
-
-    scratch.resizedFlow.resize(static_cast<size_t>(sourceWidth) * sourceHeight * 4);
-    resizeAndScaleFlow(scratch.flow.data(), inferenceWidth, inferenceHeight,
-                       scratch.resizedFlow.data(), sourceWidth, sourceHeight);
-    return scratch.resizedFlow.data();
 }
 
 static void buildDisplacementFromFlow(const float* flow, const int width, const int height,
@@ -1454,11 +1461,13 @@ static std::vector<char> buildMotionVectorBlobFromDisplacement(const VSFrame* cu
     const auto sadContext = makeSADContext(current, reference, &d, vsapi, currentLumaPtr, referenceLumaPtr);
     for (auto by = 0; by < d.mvBlkY; by++) {
         const auto blockY = by * d.mvStepY - d.mvVPadding;
+        const auto internalBlockY = by * d.mvInternalStepY - d.mvInternalVPadding;
         for (auto bx = 0; bx < d.mvBlkX; bx++) {
             const auto blockX = bx * d.mvStepX - d.mvHPadding;
+            const auto internalBlockX = bx * d.mvInternalStepX - d.mvInternalHPadding;
             auto& vector = vectors[static_cast<size_t>(by) * d.mvBlkX + bx];
-            const auto pixelDx = reduceBlockFlow(displacementX, displacementWidth, displacementHeight, blockX, blockY, &d);
-            const auto pixelDy = reduceBlockFlow(displacementY, displacementWidth, displacementHeight, blockX, blockY, &d);
+            const auto pixelDx = reduceBlockFlow(displacementX, displacementWidth, displacementHeight, internalBlockX, internalBlockY, &d) * d.mvMotionScaleX;
+            const auto pixelDy = reduceBlockFlow(displacementY, displacementWidth, displacementHeight, internalBlockX, internalBlockY, &d) * d.mvMotionScaleY;
 
             vector.x = static_cast<int>(std::lround(pixelDx * d.mvPel));
             vector.y = static_cast<int>(std::lround(pixelDy * d.mvPel));
@@ -1516,10 +1525,8 @@ static void filter(const VSFrame* src0, const VSFrame* src1, VSFrame* dst,
 static bool attachMotionVectors(const VSFrame* currentSource, const VSFrame* referenceSource,
                                 const VSFrame* currentInference, const VSFrame* referenceInference, VSFrame* dst,
                                 const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept {
-    const auto inferenceWidth = vsapi->getFrameWidth(currentInference, 0);
-    const auto inferenceHeight = vsapi->getFrameHeight(currentInference, 0);
-    const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
-    const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
+    const auto width = vsapi->getFrameWidth(currentInference, 0);
+    const auto height = vsapi->getFrameHeight(currentInference, 0);
     const auto stride = vsapi->getStride(currentInference, 0) / vsapi->getVideoFrameFormat(currentInference)->bytesPerSample;
     auto props = vsapi->getFramePropertiesRW(dst);
     std::vector<char> vectorBlob;
@@ -1527,7 +1534,7 @@ static bool attachMotionVectors(const VSFrame* currentSource, const VSFrame* ref
 
     if (referenceInference) {
         auto& scratch = getMotionVectorScratchBuffers();
-        const auto flowSize = static_cast<size_t>(inferenceWidth) * inferenceHeight * 4;
+        const auto flowSize = static_cast<size_t>(width) * height * 4;
         scratch.flow.resize(flowSize);
         const std::vector<float>* currentLumaCache = nullptr;
         const std::vector<float>* referenceLumaCache = nullptr;
@@ -1542,13 +1549,13 @@ static bool attachMotionVectors(const VSFrame* currentSource, const VSFrame* ref
 
         const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
                                                       firstR, firstG, firstB, secondR, secondG, secondB,
-                                                      scratch.flow.data(), inferenceWidth, inferenceHeight, stride);
+                                                      scratch.flow.data(), width, height, stride);
         if (status != 0)
             return false;
 
-        const auto* exportFlow = normalizeFlowForExport(scratch, inferenceWidth, inferenceHeight, sourceWidth, sourceHeight);
-
         if (!d->mvUseChroma) {
+            const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
+            const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
             const auto sourceStride = static_cast<int>(vsapi->getStride(currentSource, 0) / vsapi->getVideoFrameFormat(currentSource)->bytesPerSample);
             buildFrameLumaPlane(currentSource, sourceWidth, sourceHeight, sourceStride, scratch.currentLuma, static_cast<double>((1ULL << d->mvBits) - 1ULL), vsapi);
             buildFrameLumaPlane(referenceSource, sourceWidth, sourceHeight, sourceStride, scratch.referenceLuma, static_cast<double>((1ULL << d->mvBits) - 1ULL), vsapi);
@@ -1556,7 +1563,7 @@ static bool attachMotionVectors(const VSFrame* currentSource, const VSFrame* ref
             referenceLumaCache = &scratch.referenceLuma;
         }
 
-        vectorBlob = buildMVToolsVectorBlob(currentSource, referenceSource, exportFlow, sourceWidth, sourceHeight, true, d, vsapi,
+        vectorBlob = buildMVToolsVectorBlob(currentSource, referenceSource, scratch.flow.data(), width, height, true, d, vsapi,
                                             currentLumaCache, referenceLumaCache, &stats);
     } else {
         vectorBlob = buildMVToolsVectorBlob(currentSource, currentSource, nullptr, 0, 0, false, d, vsapi, nullptr, nullptr, &stats);
@@ -1776,13 +1783,10 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                     accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
-            const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
-            const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
-            const auto* exportFlow = normalizeFlowForExport(scratch, width, height, sourceWidth, sourceHeight);
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
-            backwardBlob = buildMotionVectorBlobFromConfig(currentSource, referenceSource, exportFlow, sourceWidth, sourceHeight, true, d->mvConfig, true, vsapi,
+            backwardBlob = buildMotionVectorBlobFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, true, vsapi,
                                                            currentLumaCache, referenceLumaCache, &backwardStats);
-            forwardBlob = buildMotionVectorBlobFromConfig(referenceSource, currentSource, exportFlow, sourceWidth, sourceHeight, true, d->mvConfig, false, vsapi,
+            forwardBlob = buildMotionVectorBlobFromConfig(referenceSource, currentSource, scratch.flow.data(), width, height, true, d->mvConfig, false, vsapi,
                                                           referenceLumaCache, currentLumaCache, &forwardStats);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
@@ -1913,7 +1917,7 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
         MotionVectorFrameStats forwardStats{};
         auto& backwardDisplacement = scratch.backwardDisplacement;
         auto& forwardDisplacement = scratch.forwardDisplacement;
-        const auto planeSize = static_cast<size_t>(d->vi.width) * d->vi.height;
+        const auto planeSize = static_cast<size_t>(d->mvConfig.inferenceWidth) * d->mvConfig.inferenceHeight;
 
         if (reference) {
             const auto width = vsapi->getFrameWidth(current, 0);
@@ -1978,19 +1982,16 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
                     accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
-            const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
-            const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
-            const auto* exportFlow = normalizeFlowForExport(scratch, width, height, sourceWidth, sourceHeight);
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
-            backwardBlob = buildMotionVectorBlobFromConfig(currentSource, referenceSource, exportFlow, sourceWidth, sourceHeight, true, d->mvConfig, true, vsapi,
+            backwardBlob = buildMotionVectorBlobFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, true, vsapi,
                                                            currentLumaCache, referenceLumaCache, &backwardStats);
-            forwardBlob = buildMotionVectorBlobFromConfig(referenceSource, currentSource, exportFlow, sourceWidth, sourceHeight, true, d->mvConfig, false, vsapi,
+            forwardBlob = buildMotionVectorBlobFromConfig(referenceSource, currentSource, scratch.flow.data(), width, height, true, d->mvConfig, false, vsapi,
                                                           referenceLumaCache, currentLumaCache, &forwardStats);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
             const auto displacementBuildStartNs = d->perfStats ? monotonicNowNs() : 0;
-            buildDisplacementFromFlow(exportFlow, sourceWidth, sourceHeight, 0, backwardDisplacement);
-            buildDisplacementFromFlow(exportFlow, sourceWidth, sourceHeight, 2, forwardDisplacement);
+            buildDisplacementFromFlow(scratch.flow.data(), width, height, 0, backwardDisplacement);
+            buildDisplacementFromFlow(scratch.flow.data(), width, height, 2, forwardDisplacement);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->displacementBuildNs, monotonicNowNs() - displacementBuildStartNs);
         } else {
@@ -2112,8 +2113,8 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
 
         current = vsapi->getFrameFilter(n, d->sourceNode, frameCtx);
         reference = vsapi->getFrameFilter(d->backward ? n + delta : n - delta, d->sourceNode, frameCtx);
-        const auto width = d->vi.width;
-        const auto height = d->vi.height;
+        const auto width = d->mvConfig.inferenceWidth;
+        const auto height = d->mvConfig.inferenceHeight;
         const auto displacementKey = d->backward ? RIFEMVBackwardDisplacementInternalKey : RIFEMVForwardDisplacementInternalKey;
         std::vector<const float*> displacementXs(delta);
         std::vector<const float*> displacementYs(delta);
@@ -2432,6 +2433,11 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
 
             const auto inferenceWidth = computeInferenceDimension(sourceVi.width, resScale, "width");
             const auto inferenceHeight = computeInferenceDimension(sourceVi.height, resScale, "height");
+            const auto mvInternalGeometry = createMotionVectorInternalGeometry(sourceVi.width, sourceVi.height,
+                                                                               inferenceWidth, inferenceHeight,
+                                                                               mvBlockSizeX, mvBlockSizeY,
+                                                                               mvOverlapX, mvOverlapY,
+                                                                               mvHPadding, mvVPadding);
             const auto clipSet = buildMotionVectorClipSet(in, d->node, sourceVi, inferenceWidth, inferenceHeight, core, vsapi);
             vsapi->freeNode(d->node);
             d->node = clipSet.inferenceNode;
@@ -2439,7 +2445,8 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             sourceConverted = clipSet.convertedFromYUV;
 
             const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
-            d->mvConfig = createMotionVectorConfig(d->vi, metadataVi, d->mvUseChroma, mvBlockSizeX, mvBlockSizeY,
+            d->mvConfig = createMotionVectorConfig(d->vi, metadataVi, mvInternalGeometry,
+                                                   d->mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                    mvOverlapX, mvOverlapY,
                                                    mvPel, mvDelta, mvBits, mvHPadding,
                                                    mvVPadding, mvBlockReduce, mvSadMultiplier);
@@ -2730,6 +2737,11 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 
         const auto inferenceWidth = computeInferenceDimension(sourceVi.width, resScale, "width");
         const auto inferenceHeight = computeInferenceDimension(sourceVi.height, resScale, "height");
+        const auto mvInternalGeometry = createMotionVectorInternalGeometry(sourceVi.width, sourceVi.height,
+                                                                           inferenceWidth, inferenceHeight,
+                                                                           mvBlockSizeX, mvBlockSizeY,
+                                                                           mvOverlapX, mvOverlapY,
+                                                                           mvHPadding, mvVPadding);
         const auto clipSet = buildMotionVectorClipSet(in, pairData->node, sourceVi, inferenceWidth, inferenceHeight, core, vsapi);
         vsapi->freeNode(pairData->node);
         pairData->node = clipSet.inferenceNode;
@@ -2737,7 +2749,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         sourceConverted = clipSet.convertedFromYUV;
 
         const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
-        pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
+        pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, mvDelta,
                                   mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, flowScale, flowResizeMode,
@@ -2995,6 +3007,11 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
         const auto inferenceWidth = computeInferenceDimension(sourceVi.width, resScale, "width");
         const auto inferenceHeight = computeInferenceDimension(sourceVi.height, resScale, "height");
+        const auto mvInternalGeometry = createMotionVectorInternalGeometry(sourceVi.width, sourceVi.height,
+                                                                           inferenceWidth, inferenceHeight,
+                                                                           mvBlockSizeX, mvBlockSizeY,
+                                                                           mvOverlapX, mvOverlapY,
+                                                                           mvHPadding, mvVPadding);
         const auto clipSet = buildMotionVectorClipSet(in, pairData->node, sourceVi, inferenceWidth, inferenceHeight, core, vsapi);
         vsapi->freeNode(pairData->node);
         pairData->node = clipSet.inferenceNode;
@@ -3002,11 +3019,13 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         sourceConverted = clipSet.convertedFromYUV;
 
         const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
-        pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
+        pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry,
+                                                      mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, 1,
                                                       mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         for (auto delta = 1; delta <= maxDelta; delta++) {
-            outputConfigs[delta] = createMotionVectorConfig(pairData->vi, metadataVi, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
+            outputConfigs[delta] = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry,
+                                                            mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                             mvOverlapX, mvOverlapY, mvPel, delta,
                                                             mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         }

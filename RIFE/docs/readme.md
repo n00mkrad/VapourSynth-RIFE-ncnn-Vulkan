@@ -55,13 +55,13 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
 - `res_scale`
   MV-export-only clip-resize factor applied before RIFE flow inference.
   Default: `1.0`.
-  The plugin rescales the RGBS inference clip to `round(width * res_scale)` by `round(height * res_scale)`, runs RIFE flow on that resized clip, then upsamples the exported flow back to the original clip resolution before block reduction, SAD computation, and MVTools export.
+  The plugin rescales the RGBS inference clip to `round(width * res_scale)` by `round(height * res_scale)` and runs RIFE flow on that resized clip. Motion-vector reduction then happens on an internal block lattice derived from the inference size, and only the final block vectors are scaled back to original-image coordinates for SAD computation and MVTools export.
   This means `blksize_x`, `blksize_y`, `overlap_x`, `overlap_y`, `hpad`, and `vpad` always operate on the original clip geometry, so a given block-size configuration always produces the same block grid regardless of `res_scale`.
   Example: use `res_scale=0.5` to run a 2160p clip internally at about 1080p without changing MVTools block size.
   `res_scale` is only accepted by `rife.RIFE` when `mv=1`.
 
 - `cpu_flow_resize`
-  Debug control for the flow upsampling path used by motion-vector export.
+  Debug control for the internal resize path used by motion-vector export.
   Omit this argument for automatic behavior (GPU resize when available, CPU fallback on failure).
   `False` (`0`) forces the GPU resize path only.
   `True` (`1`) forces the CPU resize fallback path.
