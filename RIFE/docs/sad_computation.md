@@ -190,7 +190,7 @@ That means:
 
 - `RMV_AvgSadNorm` preserves the previous raw mean exported block SAD and will generally increase with larger blocks.
 - `RMV_AvgSad` is the mean of the per-block SADs after each block has been converted into the implicit 8x8-equivalent threshold space used by MVTools user parameters.
-- `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, and `RMV_AvgSadHigh50Pct` are the rounded means of the highest `ceil(N * p)` per-block 8x8-equivalent SADs for that frame.
+- `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, `RMV_AvgSadHigh50Pct`, and `RMV_AvgSadHigh75Pct` are the rounded means of the highest `ceil(N * p)` per-block 8x8-equivalent SADs for that frame.
 - `RMV_AvgSadLow2Pct`, `RMV_AvgSadLow10Pct`, and `RMV_AvgSadLow25Pct` are the rounded means of the lowest `ceil(N * p)` per-block 8x8-equivalent SADs for that frame.
 - `RMV_SadAvgDeviation` is `abs(maxSad8x8 - RMV_AvgSad)`, again using per-block 8x8-equivalent SADs.
 
