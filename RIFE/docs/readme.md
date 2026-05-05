@@ -36,10 +36,11 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - Motion-vector APIs accept either constant-format `RGBS` or constant-format `YUV`. Non-`RGBS` `YUV` input is converted internally to `RGBS` for RIFE inference.
 - MVTools usually operates on a different clip, often `YUV420P8`. `meta_clip` is still optional and can be used explicitly as the metadata source.
 - If the input is non-`RGBS` and `meta_clip` is omitted, the plugin now uses the original input clip as the metadata source automatically.
-- Vector clips are `Gray8` carrier clips. The motion data still lives in frame properties, and the pixel plane now contains a per-frame normalized SAD mask derived from the exported block SADs for that direction.
-- The SAD carrier mask uses the exported raw per-block `VECTOR.sad` values, maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
-- Frames without a valid reference still export invalid MVTools vectors as before, and their carrier mask becomes solid `255`.
-- Exported motion-vector frames also include `RMV_AvgSad` as an integer 8x8-equivalent average SAD in MVTools threshold space, `RMV_AvgSadNorm` as an integer frame property preserving the previous raw average exported block SAD behavior, `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, `RMV_AvgSadHigh50Pct`, `RMV_AvgSadHigh75Pct`, `RMV_AvgSadLow2Pct`, `RMV_AvgSadLow10Pct`, `RMV_AvgSadLow25Pct`, and `RMV_SadAvgDeviation` as integer 8x8-equivalent SAD summary properties, plus `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` as float frame properties. `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
+- Vector clips are `Gray8` carrier clips. The motion data still lives in frame properties, and the pixel plane now contains a SAD mask derived from the exported block SADs for that direction.
+- By default the SAD carrier mask is relative: it maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
+- If `abs_sad_clip_range > 0`, the carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
+- Frames without a valid reference still export invalid MVTools vectors as before. In relative mode their carrier mask is solid `255`; in absolute mode it shows the clipped sentinel SAD, which will usually also be `255`.
+- Exported motion-vector frames also include `RMV_AvgSad` as an integer 8x8-equivalent average SAD in MVTools threshold space, `RMV_AvgSadNorm` as an integer frame property preserving the previous raw average exported block SAD behavior, `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, `RMV_AvgSadHigh50Pct`, `RMV_AvgSadHigh75Pct`, `RMV_AvgSadLow2Pct`, `RMV_AvgSadLow10Pct`, `RMV_AvgSadLow25Pct`, `RMV_MaxSad`, `RMV_MinSad`, and `RMV_SadAvgDeviation` as integer 8x8-equivalent SAD summary properties, plus `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` as float frame properties. `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
 ## Shared motion-vector arguments
@@ -98,6 +99,13 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   This scales valid block SADs, invalid-frame sentinel SADs, and therefore all exported `RMV_*Sad*` frame properties.
   It does not affect motion estimation or exported vector `x`/`y` components.
 
+- `abs_sad_clip_range`
+  Controls how SAD values are written into the `Gray8` carrier pixels.
+  Default: `0`.
+  `0` keeps the relative per-frame normalization mode.
+  Values greater than `0` enable absolute mode, where the carrier starts at SAD `0`, clips at the requested upper bound, and uses the available `Gray8` precision to quantize that range.
+  Examples: `1024` gives steps of `4`, `2048` gives steps of `8`, `4096` gives steps of `16`.
+
 - `meta_clip`
   Metadata-source clip for MVTools compatibility.
   This should usually be the actual clip you will feed to MVTools, for example the original `YUV420P8` source.
@@ -132,7 +140,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value

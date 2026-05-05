@@ -192,6 +192,7 @@ That means:
 - `RMV_AvgSad` is the mean of the per-block SADs after each block has been converted into the implicit 8x8-equivalent threshold space used by MVTools user parameters.
 - `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, `RMV_AvgSadHigh50Pct`, and `RMV_AvgSadHigh75Pct` are the rounded means of the highest `ceil(N * p)` per-block 8x8-equivalent SADs for that frame.
 - `RMV_AvgSadLow2Pct`, `RMV_AvgSadLow10Pct`, and `RMV_AvgSadLow25Pct` are the rounded means of the lowest `ceil(N * p)` per-block 8x8-equivalent SADs for that frame.
+- `RMV_MaxSad` and `RMV_MinSad` are the maximum and minimum per-block 8x8-equivalent SADs for that frame.
 - `RMV_SadAvgDeviation` is `abs(maxSad8x8 - RMV_AvgSad)`, again using per-block 8x8-equivalent SADs.
 
 Because MVTools performs its own block-size normalization internally, changing the actual exported `VECTOR.sad` values to an 8x8-equivalent scale would break downstream threshold behavior.
@@ -202,7 +203,9 @@ The public vector clips returned by `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox
 
 The mask is generated from the selected direction's exported finest-plane block `sad` values already stored in `MVTools_vectors`. The pixel plane does not use `RMV_AvgSad`, `RMV_AvgSadNorm`, or any other summary property.
 
-### Per-frame normalization
+### Relative mode
+
+If `abs_sad_clip_range = 0`, the mask uses the relative per-frame mode.
 
 Let `sad[i]` be the raw exported `VECTOR.sad` for block `i` in that frame, and let:
 
@@ -226,6 +229,30 @@ This means:
 - the largest SAD present in that frame becomes white
 - the contrast is frame-local rather than globally calibrated
 
+### Absolute mode
+
+If `abs_sad_clip_range > 0`, the mask switches to an absolute clipped range that still starts at SAD `0`.
+
+Let:
+
+```text
+clipRange = abs_sad_clip_range
+clippedSad[i] = min(max(sad[i], 0), clipRange)
+maskSmall[i] = min(floor(clippedSad[i] * 256 / clipRange), 255)
+```
+
+This means:
+
+- SAD values are quantized against a fixed range instead of the current frame maximum
+- values at or above `clipRange` map to white
+- when `clipRange` is a multiple of `256`, each code step corresponds to `clipRange / 256` SAD units
+
+Examples:
+
+- `abs_sad_clip_range = 1024` gives steps of `4`
+- `abs_sad_clip_range = 2048` gives steps of `8`
+- `abs_sad_clip_range = 4096` gives steps of `16`
+
 ### Full-frame rasterization
 
 One normalized value is produced for each exported block, so the intermediate mask is a `nBlkX x nBlkY` grid. That small grid is then bilinearly upscaled directly to the full output frame size.
@@ -244,4 +271,4 @@ sad = round(blockSize * blockSize * (1 << bits) * sadMultiplier)
 
 This sentinel is stored directly without running the per-pixel SAD loop.
 
-Because every block in an invalid frame receives the same nonzero sentinel SAD, the per-frame normalization above produces a solid `255` `Gray8` carrier mask for that direction.
+Because every block in an invalid frame receives the same nonzero sentinel SAD, relative mode produces a solid `255` `Gray8` carrier mask for that direction. In absolute mode the mask shows that same sentinel after clipping to `abs_sad_clip_range`, which will usually also produce `255`.
