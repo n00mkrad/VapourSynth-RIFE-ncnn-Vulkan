@@ -196,6 +196,42 @@ That means:
 
 Because MVTools performs its own block-size normalization internally, changing the actual exported `VECTOR.sad` values to an 8x8-equivalent scale would break downstream threshold behavior.
 
+## Gray8 carrier SAD mask
+
+The public vector clips returned by `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3` are `Gray8` carrier clips. Their MVTools compatibility still comes entirely from frame properties, but the exposed pixel plane is now populated with a direction-specific SAD mask instead of dummy zeroes.
+
+The mask is generated from the selected direction's exported finest-plane block `sad` values already stored in `MVTools_vectors`. The pixel plane does not use `RMV_AvgSad`, `RMV_AvgSadNorm`, or any other summary property.
+
+### Per-frame normalization
+
+Let `sad[i]` be the raw exported `VECTOR.sad` for block `i` in that frame, and let:
+
+```text
+frameMaxSad = max(sad[i])
+```
+
+If `frameMaxSad <= 0`, the whole `Gray8` plane is filled with `0`.
+
+Otherwise each block-grid sample is normalized as:
+
+```text
+maskSmall[i] = round(sad[i] * 255 / frameMaxSad)
+```
+
+with the result clamped to `[0, 255]`.
+
+This means:
+
+- absolute zero SAD stays black
+- the largest SAD present in that frame becomes white
+- the contrast is frame-local rather than globally calibrated
+
+### Full-frame rasterization
+
+One normalized value is produced for each exported block, so the intermediate mask is a `nBlkX x nBlkY` grid. That small grid is then bilinearly upscaled directly to the full output frame size.
+
+This rasterization is intentionally smooth and visualization-oriented. It is meant to make the `Gray8` carrier clip directly useful as a SAD mask, not to reproduce MVTools `mv.Mask(kind=1)` byte-for-byte.
+
 ## Invalid vectors
 
 If no valid reference frame exists, the vector is marked invalid and uses:
@@ -207,3 +243,5 @@ sad = round(blockSize * blockSize * (1 << bits) * sadMultiplier)
 ```
 
 This sentinel is stored directly without running the per-pixel SAD loop.
+
+Because every block in an invalid frame receives the same nonzero sentinel SAD, the per-frame normalization above produces a solid `255` `Gray8` carrier mask for that direction.

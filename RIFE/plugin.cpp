@@ -188,6 +188,12 @@ struct MotionVectorFrameStats final {
     double panAmount;
 };
 
+struct BilinearAxisEntry final {
+    int index0;
+    int index1;
+    float alpha;
+};
+
 struct MotionVectorFrameStatsKeys final {
     const char* averageSadRaw;
     const char* averageSad8x8;
@@ -1446,6 +1452,102 @@ static std::vector<char> packMotionVectorBlob(const std::vector<MVToolsVector>& 
     return blob;
 }
 
+static void buildMaskResizeAxisTable(const int srcSize, const int dstSize,
+                                     std::vector<BilinearAxisEntry>& table) {
+    table.resize(dstSize);
+    if (srcSize <= 1) {
+        for (int i = 0; i < dstSize; i++)
+            table[i] = { 0, 0, 0.0f };
+
+        return;
+    }
+
+    const auto scale = static_cast<float>(srcSize) / static_cast<float>(dstSize);
+    for (int i = 0; i < dstSize; i++) {
+        auto sample = (i + 0.5f) * scale - 0.5f;
+        sample = std::max(0.0f, std::min(sample, static_cast<float>(srcSize - 1)));
+        const auto index0 = static_cast<int>(std::floor(sample));
+        const auto index1 = std::min(index0 + 1, srcSize - 1);
+        table[i] = { index0, index1, sample - index0 };
+    }
+}
+
+static bool unpackMotionVectorBlob(const char* vectorBlob, const int vectorBlobSize,
+                                   const MVAnalysisData& analysisData, std::vector<MVToolsVector>& vectors) {
+    if (!vectorBlob || vectorBlobSize < static_cast<int>(sizeof(MVArraySizeType) * 3) ||
+        analysisData.nBlkX <= 0 || analysisData.nBlkY <= 0)
+        return false;
+
+    const auto vectorCount = static_cast<size_t>(analysisData.nBlkX) * analysisData.nBlkY;
+    const auto expectedPlaneSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) + vectorCount * sizeof(MVToolsVector));
+    const auto expectedGroupSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2 + expectedPlaneSize);
+    MVArraySizeType groupSize{};
+    MVArraySizeType planeSize{};
+    std::memcpy(&groupSize, vectorBlob, sizeof(groupSize));
+    std::memcpy(&planeSize, vectorBlob + sizeof(MVArraySizeType) * 2, sizeof(planeSize));
+
+    if (groupSize < expectedGroupSize || groupSize > vectorBlobSize ||
+        planeSize < expectedPlaneSize || planeSize > groupSize - static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2) ||
+        vectorBlobSize < expectedGroupSize)
+        return false;
+
+    vectors.resize(vectorCount);
+    std::memcpy(vectors.data(), vectorBlob + sizeof(MVArraySizeType) * 3, vectorCount * sizeof(MVToolsVector));
+    return true;
+}
+
+static void renderMotionVectorSADMask(VSFrame* frame, const VSVideoInfo& vi,
+                                      const char* vectorBlob, const int vectorBlobSize,
+                                      const MVAnalysisData& analysisData, const VSAPI* vsapi) {
+    auto* dstp = vsapi->getWritePtr(frame, 0);
+    const auto dstStride = vsapi->getStride(frame, 0);
+    std::vector<MVToolsVector> vectors;
+    if (!unpackMotionVectorBlob(vectorBlob, vectorBlobSize, analysisData, vectors)) {
+        for (int y = 0; y < vi.height; y++)
+            std::memset(dstp + static_cast<size_t>(y) * dstStride, 0, dstStride);
+
+        return;
+    }
+
+    int64_t frameMaxSad{};
+    for (const auto& vector : vectors)
+        frameMaxSad = std::max(frameMaxSad, vector.sad);
+
+    if (frameMaxSad <= 0) {
+        for (int y = 0; y < vi.height; y++)
+            std::memset(dstp + static_cast<size_t>(y) * dstStride, 0, dstStride);
+
+        return;
+    }
+
+    std::vector<uint8_t> smallMask(vectors.size());
+    for (size_t i = 0; i < vectors.size(); i++) {
+        const auto sad = std::max<int64_t>(vectors[i].sad, 0);
+        const auto scaled = static_cast<int>(static_cast<long double>(sad) * 255.0L / frameMaxSad + 0.5L);
+        smallMask[i] = static_cast<uint8_t>(std::clamp(scaled, 0, 255));
+    }
+
+    std::vector<BilinearAxisEntry> xTable;
+    std::vector<BilinearAxisEntry> yTable;
+    buildMaskResizeAxisTable(analysisData.nBlkX, vi.width, xTable);
+    buildMaskResizeAxisTable(analysisData.nBlkY, vi.height, yTable);
+
+    for (int y = 0; y < vi.height; y++) {
+        auto* dstRow = dstp + static_cast<size_t>(y) * dstStride;
+        std::memset(dstRow, 0, dstStride);
+        const auto& yEntry = yTable[static_cast<size_t>(y)];
+        const auto* row0 = smallMask.data() + static_cast<size_t>(yEntry.index0) * analysisData.nBlkX;
+        const auto* row1 = smallMask.data() + static_cast<size_t>(yEntry.index1) * analysisData.nBlkX;
+
+        for (int x = 0; x < vi.width; x++) {
+            const auto& xEntry = xTable[static_cast<size_t>(x)];
+            const auto top = row0[xEntry.index0] * (1.0f - xEntry.alpha) + row0[xEntry.index1] * xEntry.alpha;
+            const auto bottom = row1[xEntry.index0] * (1.0f - xEntry.alpha) + row1[xEntry.index1] * xEntry.alpha;
+            dstRow[x] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(top * (1.0f - yEntry.alpha) + bottom * yEntry.alpha)), 0, 255));
+        }
+    }
+}
+
 static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* reference, const float* flow,
                                                 const int flowWidth, const int flowHeight,
                                                 const bool valid, const MotionVectorExportContext& ctx,
@@ -1711,7 +1813,7 @@ static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisD
                                         const MotionVectorFrameStats& stats,
                                         VSCore* core, const VSAPI* vsapi) {
     auto dst = vsapi->newVideoFrame(&vi.format, vi.width, vi.height, nullptr, core);
-    zeroMotionVectorFrame(dst, vi, vsapi);
+    renderMotionVectorSADMask(dst, vi, vectorBlob, vectorBlobSize, analysisData, vsapi);
     auto props = vsapi->getFramePropertiesRW(dst);
     setMotionVectorProperties(props, analysisData, vectorBlob, vectorBlobSize, stats, vsapi);
     return dst;
@@ -1868,7 +1970,6 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
         if (pairIndex >= 0 && pairIndex < d->vi.numFrames)
             pairFrame = vsapi->getFrameFilter(pairIndex, d->node, frameCtx);
 
-        VSFrame* dst{};
         const char* vectorBlob = nullptr;
         int vectorBlobSize{};
         auto stats = d->invalidStats;
@@ -1878,19 +1979,12 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
             vectorBlob = vsapi->mapGetData(pairProps, blobKey, 0, nullptr);
             vectorBlobSize = vsapi->mapGetDataSize(pairProps, blobKey, 0, nullptr);
             stats = getMotionVectorInternalFrameStats(pairProps, d->backward, vsapi);
-            dst = vsapi->copyFrame(pairFrame, core);
         } else {
-            dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
-            zeroMotionVectorFrame(dst, d->vi, vsapi);
             vectorBlob = d->invalidBlob.data();
             vectorBlobSize = static_cast<int>(d->invalidBlob.size());
         }
 
-        auto props = vsapi->getFramePropertiesRW(dst);
-        vsapi->mapDeleteKey(props, RIFEMVBackwardVectorsInternalKey);
-        vsapi->mapDeleteKey(props, RIFEMVForwardVectorsInternalKey);
-        deleteMotionVectorInternalFrameStats(props, vsapi);
-        setMotionVectorProperties(props, d->analysisData, vectorBlob, vectorBlobSize, stats, vsapi);
+        auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, stats, core, vsapi);
 
         vsapi->freeFrame(pairFrame);
         if (d->perfStats) {
