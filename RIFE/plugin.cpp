@@ -112,6 +112,8 @@ constexpr auto RIFEMVBackwardAvgAbsDyInternalKey = "_RMVBackwardAvgAbsDy";
 constexpr auto RIFEMVForwardAvgAbsDyInternalKey = "_RMVForwardAvgAbsDy";
 constexpr auto RIFEMVBackwardAvgAbsMotionInternalKey = "_RMVBackwardAvgAbsMotion";
 constexpr auto RIFEMVForwardAvgAbsMotionInternalKey = "_RMVForwardAvgAbsMotion";
+constexpr auto RIFEMVBackwardPanAmountInternalKey = "_RMVBackwardPanAmount";
+constexpr auto RIFEMVForwardPanAmountInternalKey = "_RMVForwardPanAmount";
 constexpr auto RIFEMVAvgSadKey = "RMV_AvgSad";
 constexpr auto RIFEMVAvgSadNormKey = "RMV_AvgSadNorm";
 constexpr auto RIFEMVAvgSadHigh2PctKey = "RMV_AvgSadHigh2Pct";
@@ -124,6 +126,7 @@ constexpr auto RIFEMVSadAvgDeviationKey = "RMV_SadAvgDeviation";
 constexpr auto RIFEMVAvgAbsDxKey = "RMV_AvgAbsDx";
 constexpr auto RIFEMVAvgAbsDyKey = "RMV_AvgAbsDy";
 constexpr auto RIFEMVAvgAbsMotionKey = "RMV_AvgAbsMotion";
+constexpr auto RIFEMVPanAmountKey = "RMV_PanAmount";
 constexpr int MotionIsBackward = 0x00000002;
 constexpr int MotionUseChromaMotion = 0x00000008;
 constexpr int MVBlockReduceCenter = 0;
@@ -174,6 +177,7 @@ struct MotionVectorFrameStats final {
     double averageAbsDx;
     double averageAbsDy;
     double averageAbsMotion;
+    double panAmount;
 };
 
 struct MotionVectorFrameStatsKeys final {
@@ -189,6 +193,7 @@ struct MotionVectorFrameStatsKeys final {
     const char* averageAbsDx;
     const char* averageAbsDy;
     const char* averageAbsMotion;
+    const char* panAmount;
 };
 
 struct MotionVectorConfig final {
@@ -418,7 +423,11 @@ static MotionVectorFrameStats computeMotionVectorFrameStats(const std::vector<MV
     int64_t maxSad8x8{};
     double absMotionSum{};
     std::vector<int64_t> normalizedSads;
+    std::vector<int> signedDxs;
+    std::vector<int> signedDys;
     normalizedSads.reserve(vectors.size());
+    signedDxs.reserve(vectors.size());
+    signedDys.reserve(vectors.size());
     for (const auto& vector : vectors) {
         const auto sad8x8 = normalizeMotionVectorSadTo8x8(vector.sad, analysisData);
         sadRawSum += vector.sad;
@@ -428,6 +437,8 @@ static MotionVectorFrameStats computeMotionVectorFrameStats(const std::vector<MV
         absMotionSum += std::hypot(static_cast<double>(vector.x), static_cast<double>(vector.y));
         maxSad8x8 = std::max(maxSad8x8, sad8x8);
         normalizedSads.push_back(sad8x8);
+        signedDxs.push_back(vector.x);
+        signedDys.push_back(vector.y);
     }
 
     const auto vectorCount = static_cast<int64_t>(vectors.size());
@@ -459,6 +470,22 @@ static MotionVectorFrameStats computeMotionVectorFrameStats(const std::vector<MV
     stats.averageSadLow10Pct = computeAverage(false, 10);
     stats.averageSadLow25Pct = computeAverage(false, 25);
     stats.sadAvgDeviation = std::llabs(maxSad8x8 - stats.averageSad8x8);
+
+    const auto computeMedianComponent = [&](std::vector<int>& values) {
+        const auto mid = values.begin() + static_cast<ptrdiff_t>(values.size() / 2);
+        std::nth_element(values.begin(), mid, values.end());
+        if ((values.size() & 1U) != 0)
+            return static_cast<double>(*mid);
+
+        const auto upper = *mid;
+        const auto lowerMid = std::max_element(values.begin(), mid);
+        return (static_cast<double>(*lowerMid) + static_cast<double>(upper)) * 0.5;
+    };
+
+    const auto pelScale = analysisData.nPel > 0 ? static_cast<double>(analysisData.nPel) : 1.0;
+    const auto medianDx = computeMedianComponent(signedDxs) / pelScale;
+    const auto medianDy = computeMedianComponent(signedDys) / pelScale;
+    stats.panAmount = std::hypot(medianDx, medianDy);
     return stats;
 }
 
@@ -479,6 +506,7 @@ static void setMotionVectorProperties(VSMap* props, const MVAnalysisData& analys
     vsapi->mapSetFloat(props, RIFEMVAvgAbsDxKey, stats.averageAbsDx, maReplace);
     vsapi->mapSetFloat(props, RIFEMVAvgAbsDyKey, stats.averageAbsDy, maReplace);
     vsapi->mapSetFloat(props, RIFEMVAvgAbsMotionKey, stats.averageAbsMotion, maReplace);
+    vsapi->mapSetFloat(props, RIFEMVPanAmountKey, stats.panAmount, maReplace);
 }
 
 static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bool backward) noexcept {
@@ -495,7 +523,8 @@ static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bo
             RIFEMVBackwardSadAvgDeviationInternalKey,
             RIFEMVBackwardAvgAbsDxInternalKey,
             RIFEMVBackwardAvgAbsDyInternalKey,
-            RIFEMVBackwardAvgAbsMotionInternalKey
+            RIFEMVBackwardAvgAbsMotionInternalKey,
+            RIFEMVBackwardPanAmountInternalKey
         };
     }
 
@@ -511,7 +540,8 @@ static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bo
         RIFEMVForwardSadAvgDeviationInternalKey,
         RIFEMVForwardAvgAbsDxInternalKey,
         RIFEMVForwardAvgAbsDyInternalKey,
-        RIFEMVForwardAvgAbsMotionInternalKey
+        RIFEMVForwardAvgAbsMotionInternalKey,
+        RIFEMVForwardPanAmountInternalKey
     };
 }
 
@@ -530,6 +560,7 @@ static void setMotionVectorInternalFrameStats(VSMap* props, const MotionVectorFr
     vsapi->mapSetFloat(props, keys.averageAbsDx, stats.averageAbsDx, maReplace);
     vsapi->mapSetFloat(props, keys.averageAbsDy, stats.averageAbsDy, maReplace);
     vsapi->mapSetFloat(props, keys.averageAbsMotion, stats.averageAbsMotion, maReplace);
+    vsapi->mapSetFloat(props, keys.panAmount, stats.panAmount, maReplace);
 }
 
 static MotionVectorFrameStats getMotionVectorInternalFrameStats(const VSMap* props, const bool backward,
@@ -548,6 +579,7 @@ static MotionVectorFrameStats getMotionVectorInternalFrameStats(const VSMap* pro
     stats.averageAbsDx = vsapi->mapGetFloat(props, keys.averageAbsDx, 0, nullptr);
     stats.averageAbsDy = vsapi->mapGetFloat(props, keys.averageAbsDy, 0, nullptr);
     stats.averageAbsMotion = vsapi->mapGetFloat(props, keys.averageAbsMotion, 0, nullptr);
+    stats.panAmount = vsapi->mapGetFloat(props, keys.panAmount, 0, nullptr);
     return stats;
 }
 
@@ -566,6 +598,7 @@ static void deleteMotionVectorInternalFrameStats(VSMap* props, const VSAPI* vsap
         vsapi->mapDeleteKey(props, keys.averageAbsDx);
         vsapi->mapDeleteKey(props, keys.averageAbsDy);
         vsapi->mapDeleteKey(props, keys.averageAbsMotion);
+        vsapi->mapDeleteKey(props, keys.panAmount);
     }
 }
 
