@@ -98,6 +98,10 @@ constexpr auto RIFEMVBackwardAvgSadHigh10PctInternalKey = "_RMVBackwardAvgSadHig
 constexpr auto RIFEMVForwardAvgSadHigh10PctInternalKey = "_RMVForwardAvgSadHigh10Pct";
 constexpr auto RIFEMVBackwardAvgSadHigh25PctInternalKey = "_RMVBackwardAvgSadHigh25Pct";
 constexpr auto RIFEMVForwardAvgSadHigh25PctInternalKey = "_RMVForwardAvgSadHigh25Pct";
+constexpr auto RIFEMVBackwardAvgSadHigh50PctInternalKey = "_RMVBackwardAvgSadHigh50Pct";
+constexpr auto RIFEMVForwardAvgSadHigh50PctInternalKey = "_RMVForwardAvgSadHigh50Pct";
+constexpr auto RIFEMVBackwardAvgSadHigh75PctInternalKey = "_RMVBackwardAvgSadHigh75Pct";
+constexpr auto RIFEMVForwardAvgSadHigh75PctInternalKey = "_RMVForwardAvgSadHigh75Pct";
 constexpr auto RIFEMVBackwardAvgSadLow2PctInternalKey = "_RMVBackwardAvgSadLow2Pct";
 constexpr auto RIFEMVForwardAvgSadLow2PctInternalKey = "_RMVForwardAvgSadLow2Pct";
 constexpr auto RIFEMVBackwardAvgSadLow10PctInternalKey = "_RMVBackwardAvgSadLow10Pct";
@@ -119,6 +123,8 @@ constexpr auto RIFEMVAvgSadNormKey = "RMV_AvgSadNorm";
 constexpr auto RIFEMVAvgSadHigh2PctKey = "RMV_AvgSadHigh2Pct";
 constexpr auto RIFEMVAvgSadHigh10PctKey = "RMV_AvgSadHigh10Pct";
 constexpr auto RIFEMVAvgSadHigh25PctKey = "RMV_AvgSadHigh25Pct";
+constexpr auto RIFEMVAvgSadHigh50PctKey = "RMV_AvgSadHigh50Pct";
+constexpr auto RIFEMVAvgSadHigh75PctKey = "RMV_AvgSadHigh75Pct";
 constexpr auto RIFEMVAvgSadLow2PctKey = "RMV_AvgSadLow2Pct";
 constexpr auto RIFEMVAvgSadLow10PctKey = "RMV_AvgSadLow10Pct";
 constexpr auto RIFEMVAvgSadLow25PctKey = "RMV_AvgSadLow25Pct";
@@ -170,6 +176,8 @@ struct MotionVectorFrameStats final {
     int64_t averageSadHigh2Pct;
     int64_t averageSadHigh10Pct;
     int64_t averageSadHigh25Pct;
+    int64_t averageSadHigh50Pct;
+    int64_t averageSadHigh75Pct;
     int64_t averageSadLow2Pct;
     int64_t averageSadLow10Pct;
     int64_t averageSadLow25Pct;
@@ -186,6 +194,8 @@ struct MotionVectorFrameStatsKeys final {
     const char* averageSadHigh2Pct;
     const char* averageSadHigh10Pct;
     const char* averageSadHigh25Pct;
+    const char* averageSadHigh50Pct;
+    const char* averageSadHigh75Pct;
     const char* averageSadLow2Pct;
     const char* averageSadLow10Pct;
     const char* averageSadLow25Pct;
@@ -466,6 +476,7 @@ static MotionVectorFrameStats computeMotionVectorFrameStats(const std::vector<MV
     stats.averageSadHigh2Pct = computeAverage(true, 2);
     stats.averageSadHigh10Pct = computeAverage(true, 10);
     stats.averageSadHigh25Pct = computeAverage(true, 25);
+    stats.averageSadHigh50Pct = computeAverage(true, 50);
     stats.averageSadLow2Pct = computeAverage(false, 2);
     stats.averageSadLow10Pct = computeAverage(false, 10);
     stats.averageSadLow25Pct = computeAverage(false, 25);
@@ -499,6 +510,7 @@ static void setMotionVectorProperties(VSMap* props, const MVAnalysisData& analys
     vsapi->mapSetInt(props, RIFEMVAvgSadHigh2PctKey, stats.averageSadHigh2Pct, maReplace);
     vsapi->mapSetInt(props, RIFEMVAvgSadHigh10PctKey, stats.averageSadHigh10Pct, maReplace);
     vsapi->mapSetInt(props, RIFEMVAvgSadHigh25PctKey, stats.averageSadHigh25Pct, maReplace);
+    vsapi->mapSetInt(props, RIFEMVAvgSadHigh50PctKey, stats.averageSadHigh50Pct, maReplace);
     vsapi->mapSetInt(props, RIFEMVAvgSadLow2PctKey, stats.averageSadLow2Pct, maReplace);
     vsapi->mapSetInt(props, RIFEMVAvgSadLow10PctKey, stats.averageSadLow10Pct, maReplace);
     vsapi->mapSetInt(props, RIFEMVAvgSadLow25PctKey, stats.averageSadLow25Pct, maReplace);
@@ -517,6 +529,7 @@ static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bo
             RIFEMVBackwardAvgSadHigh2PctInternalKey,
             RIFEMVBackwardAvgSadHigh10PctInternalKey,
             RIFEMVBackwardAvgSadHigh25PctInternalKey,
+            RIFEMVBackwardAvgSadHigh50PctInternalKey,
             RIFEMVBackwardAvgSadLow2PctInternalKey,
             RIFEMVBackwardAvgSadLow10PctInternalKey,
             RIFEMVBackwardAvgSadLow25PctInternalKey,
@@ -534,6 +547,7 @@ static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bo
         RIFEMVForwardAvgSadHigh2PctInternalKey,
         RIFEMVForwardAvgSadHigh10PctInternalKey,
         RIFEMVForwardAvgSadHigh25PctInternalKey,
+        RIFEMVForwardAvgSadHigh50PctInternalKey,
         RIFEMVForwardAvgSadLow2PctInternalKey,
         RIFEMVForwardAvgSadLow10PctInternalKey,
         RIFEMVForwardAvgSadLow25PctInternalKey,
@@ -553,6 +567,7 @@ static void setMotionVectorInternalFrameStats(VSMap* props, const MotionVectorFr
     vsapi->mapSetInt(props, keys.averageSadHigh2Pct, stats.averageSadHigh2Pct, maReplace);
     vsapi->mapSetInt(props, keys.averageSadHigh10Pct, stats.averageSadHigh10Pct, maReplace);
     vsapi->mapSetInt(props, keys.averageSadHigh25Pct, stats.averageSadHigh25Pct, maReplace);
+    vsapi->mapSetInt(props, keys.averageSadHigh50Pct, stats.averageSadHigh50Pct, maReplace);
     vsapi->mapSetInt(props, keys.averageSadLow2Pct, stats.averageSadLow2Pct, maReplace);
     vsapi->mapSetInt(props, keys.averageSadLow10Pct, stats.averageSadLow10Pct, maReplace);
     vsapi->mapSetInt(props, keys.averageSadLow25Pct, stats.averageSadLow25Pct, maReplace);
@@ -572,6 +587,7 @@ static MotionVectorFrameStats getMotionVectorInternalFrameStats(const VSMap* pro
     stats.averageSadHigh2Pct = vsapi->mapGetInt(props, keys.averageSadHigh2Pct, 0, nullptr);
     stats.averageSadHigh10Pct = vsapi->mapGetInt(props, keys.averageSadHigh10Pct, 0, nullptr);
     stats.averageSadHigh25Pct = vsapi->mapGetInt(props, keys.averageSadHigh25Pct, 0, nullptr);
+    stats.averageSadHigh50Pct = vsapi->mapGetInt(props, keys.averageSadHigh50Pct, 0, nullptr);
     stats.averageSadLow2Pct = vsapi->mapGetInt(props, keys.averageSadLow2Pct, 0, nullptr);
     stats.averageSadLow10Pct = vsapi->mapGetInt(props, keys.averageSadLow10Pct, 0, nullptr);
     stats.averageSadLow25Pct = vsapi->mapGetInt(props, keys.averageSadLow25Pct, 0, nullptr);
@@ -591,6 +607,7 @@ static void deleteMotionVectorInternalFrameStats(VSMap* props, const VSAPI* vsap
         vsapi->mapDeleteKey(props, keys.averageSadHigh2Pct);
         vsapi->mapDeleteKey(props, keys.averageSadHigh10Pct);
         vsapi->mapDeleteKey(props, keys.averageSadHigh25Pct);
+        vsapi->mapDeleteKey(props, keys.averageSadHigh50Pct);
         vsapi->mapDeleteKey(props, keys.averageSadLow2Pct);
         vsapi->mapDeleteKey(props, keys.averageSadLow10Pct);
         vsapi->mapDeleteKey(props, keys.averageSadLow25Pct);
