@@ -19,7 +19,8 @@
 
 DEFINE_LAYER_CREATOR(Warp)
 
-RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding, FlowResizeMode _flow_resize_mode)
+RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding,
+           FlowResizeMode _flow_resize_mode, bool _disable_vulkan_fp16)
 {
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
 
@@ -38,6 +39,7 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     num_threads = _num_threads;
     rife_v2 = _rife_v2;
     rife_v4 = _rife_v4;
+    disable_vulkan_fp16 = _disable_vulkan_fp16;
     padding = _padding;
     rife_v4_flow_blob_name.clear();
 }
@@ -266,8 +268,8 @@ int RIFE::load(const std::string& modeldir)
     ncnn::Option opt;
     opt.num_threads = num_threads;
     opt.use_vulkan_compute = vkdev ? true : false;
-    opt.use_fp16_packed = vkdev ? true : false;
-    opt.use_fp16_storage = vkdev ? true : false;
+    opt.use_fp16_packed = vkdev && !disable_vulkan_fp16;
+    opt.use_fp16_storage = vkdev && !disable_vulkan_fp16;
     opt.use_fp16_arithmetic = false;
     opt.use_int8_storage = false;
 

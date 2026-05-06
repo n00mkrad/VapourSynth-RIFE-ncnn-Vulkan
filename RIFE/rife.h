@@ -29,7 +29,7 @@ class RIFE
 {
 public:
     RIFE(int gpuid, float flow_scale = 1.f, int num_threads = 1, bool rife_v2 = false, bool rife_v4 = false,
-         int padding = 32, FlowResizeMode flow_resize_mode = FlowResizeMode::Auto);
+         int padding = 32, FlowResizeMode flow_resize_mode = FlowResizeMode::Auto, bool disable_vulkan_fp16 = false);
     ~RIFE();
 
 #if _WIN32
@@ -61,6 +61,7 @@ private:
     int num_threads;
     bool rife_v2;
     bool rife_v4;
+    bool disable_vulkan_fp16;
     int padding;
     std::string rife_v4_flow_blob_name;
 };

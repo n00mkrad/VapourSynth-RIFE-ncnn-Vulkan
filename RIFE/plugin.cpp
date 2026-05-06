@@ -66,6 +66,7 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> flowExportResizeNs{ 0 };
     std::atomic<int64_t> lumaBuildNs{ 0 };
     std::atomic<int64_t> vectorPackNs{ 0 };
+    std::atomic<int64_t> renderSadMaskNs{ 0 };
     std::atomic<int64_t> displacementBuildNs{ 0 };
     std::atomic<int64_t> composeNs{ 0 };
 };
@@ -281,6 +282,7 @@ struct ResolvedRIFEModel final {
     int padding;
     bool rifeV2;
     bool rifeV4;
+    bool disableVulkanFp16;
 };
 
 constexpr auto RIFEMVModelRequirementError =
@@ -338,6 +340,7 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto flowExportResizeNs = stats.flowExportResizeNs.load(std::memory_order_relaxed);
     const auto lumaBuildNs = stats.lumaBuildNs.load(std::memory_order_relaxed);
     const auto vectorPackNs = stats.vectorPackNs.load(std::memory_order_relaxed);
+    const auto renderSadMaskNs = stats.renderSadMaskNs.load(std::memory_order_relaxed);
     const auto displacementBuildNs = stats.displacementBuildNs.load(std::memory_order_relaxed);
     const auto composeNs = stats.composeNs.load(std::memory_order_relaxed);
 
@@ -369,10 +372,12 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
               << " shared_wait_ms=" << nsToMs(sharedSemaphoreWaitNs)
               << " luma_build_ms=" << nsToMs(lumaBuildNs)
               << " vector_pack_ms=" << nsToMs(vectorPackNs)
+              << " render_sad_mask_ms=" << nsToMs(renderSadMaskNs)
               << " displacement_build_ms=" << nsToMs(displacementBuildNs)
               << " compose_ms=" << nsToMs(composeNs) << std::endl;
     std::cerr << "  local_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(localSemaphoreWaitNs) / flowCalls : 0.0)
-              << " shared_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(sharedSemaphoreWaitNs) / flowCalls : 0.0) << std::endl;
+              << " shared_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(sharedSemaphoreWaitNs) / flowCalls : 0.0)
+              << " render_sad_mask_avg_ms=" << (outputFrames > 0 ? nsToMs(renderSadMaskNs) / outputFrames : 0.0) << std::endl;
 }
 
 static const char* flowResizeModeName(const FlowResizeMode mode) noexcept {
@@ -393,7 +398,7 @@ static void printMotionVectorInvocation(const char* const functionName, const in
                                         const FlowResizeMode flowResizeMode, const bool perfStats,
                                         const MotionVectorConfig& config, const float resScale,
                                         const int inferenceWidth, const int inferenceHeight,
-                                        const int absSadClipRange,
+                                        const int absSadClipRange, const bool renderSadMask,
                                         const char* const matrixIn, const char* const rangeIn,
                                         const bool includeDelta) {
     std::ostringstream message;
@@ -415,6 +420,7 @@ static void printMotionVectorInvocation(const char* const functionName, const in
     message << " bits=" << config.bits
             << " sad_multiplier=" << config.sadMultiplier
             << " abs_sad_clip_range=" << absSadClipRange
+            << " render_sad_mask=" << renderSadMask
             << " matrix_in_s=" << matrixIn
             << " range_in_s=" << rangeIn
             << " hpad=" << config.hPadding
@@ -868,6 +874,9 @@ static ResolvedRIFEModel resolveRIFEModel(std::string modelPath) {
         resolved.padding = 128;
     if (resolved.modelPath.find("rife-v4.26") != std::string::npos)
         resolved.padding = 64;
+    // This specific export trips ncnn Vulkan fp16 paths and loses the device during submit.
+    if (resolved.modelPath.find("rife-v4.9_ensembleFalse") != std::string::npos)
+        resolved.disableVulkanFp16 = true;
     else if (resolved.modelPath.find("rife") == std::string::npos)
         throw "unknown model dir type";
 
@@ -1257,6 +1266,7 @@ struct RIFEMVOutputData final {
     MotionVectorFrameStats invalidStats;
     int absSadClipRange;
     bool backward;
+    bool renderSadMask;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
 };
@@ -1284,6 +1294,7 @@ struct RIFEMVApproxOutputData final {
     MotionVectorFrameStats invalidStats;
     int absSadClipRange;
     bool backward;
+    bool renderSadMask;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
 };
@@ -1862,9 +1873,17 @@ static void zeroMotionVectorFrame(VSFrame* frame, const VSVideoInfo& vi, const V
 static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisData& analysisData,
                                         const char* vectorBlob, const int vectorBlobSize,
                                         const MotionVectorFrameStats& stats, const int absSadClipRange,
+                                        const bool renderSadMask, MotionVectorPerfStats* const perf,
                                         VSCore* core, const VSAPI* vsapi) {
     auto dst = vsapi->newVideoFrame(&vi.format, vi.width, vi.height, nullptr, core);
-    renderMotionVectorSADMask(dst, vi, vectorBlob, vectorBlobSize, analysisData, absSadClipRange, vsapi);
+    if (renderSadMask) {
+        const auto renderSadMaskStartNs = perf ? monotonicNowNs() : 0;
+        renderMotionVectorSADMask(dst, vi, vectorBlob, vectorBlobSize, analysisData, absSadClipRange, vsapi);
+        if (perf)
+            accumulatePerfStat(perf->renderSadMaskNs, monotonicNowNs() - renderSadMaskStartNs);
+    } else {
+        zeroMotionVectorFrame(dst, vi, vsapi);
+    }
     auto props = vsapi->getFramePropertiesRW(dst);
     setMotionVectorProperties(props, analysisData, vectorBlob, vectorBlobSize, stats, vsapi);
     return dst;
@@ -2347,6 +2366,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     VSNode* forwardNode{};
     bool hasGPUInstance{};
     int mvAbsSADClipRange{};
+    bool mvRenderSadMask{ true };
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
@@ -2414,6 +2434,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         mvAbsSADClipRange = vsapi->mapGetIntSaturated(in, "abs_sad_clip_range", 0, &err);
         if (err)
             mvAbsSADClipRange = 0;
+        mvRenderSadMask = !!vsapi->mapGetInt(in, "render_sad_mask", 0, &err);
+        if (err)
+            mvRenderSadMask = true;
         auto mvSadMultiplier{ vsapi->mapGetFloat(in, "sad_multiplier", 0, &err) };
         if (err)
             mvSadMultiplier = 1.0;
@@ -2517,7 +2540,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
                                   mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, flowScale, flowResizeMode,
                                     perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
-                                    mvAbsSADClipRange, matrixIn, rangeIn, true);
+                                    mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, true);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
             throw "failed to create RIFEMV output format";
@@ -2535,7 +2558,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
             pairData->perfLabel = "RIFEMV(delta=" + std::to_string(pairData->mvConfig.delta) + ")";
         }
-        pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding, flowResizeMode);
+        pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4,
+                                                resolvedModel.padding, flowResizeMode, resolvedModel.disableVulkanFp16);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
     } catch (const std::exception& error) {
         vsapi->mapSetError(out, ("RIFEMV: "s + error.what()).c_str());
@@ -2581,6 +2605,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     backwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, true, &backwardData->invalidStats);
     backwardData->absSadClipRange = mvAbsSADClipRange;
     backwardData->backward = true;
+    backwardData->renderSadMask = mvRenderSadMask;
     backwardData->perfStats = mvPerfStatsEnabled;
     backwardData->perf = mvPerf;
     VSFilterDependency backwardDeps[]{ { backwardData->node, rpGeneral } };
@@ -2601,6 +2626,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     forwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, false, &forwardData->invalidStats);
     forwardData->absSadClipRange = mvAbsSADClipRange;
     forwardData->backward = false;
+    forwardData->renderSadMask = mvRenderSadMask;
     forwardData->perfStats = mvPerfStatsEnabled;
     forwardData->perf = mvPerf;
     VSFilterDependency forwardDeps[]{ { forwardData->node, rpGeneral } };
@@ -2820,7 +2846,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
             pairData->perfLabel = std::string(functionName);
         }
-        pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding, flowResizeMode);
+        pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4,
+                                                resolvedModel.padding, flowResizeMode, resolvedModel.disableVulkanFp16);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
     } catch (const std::exception& error) {
         vsapi->mapSetError(out, (std::string(functionName) + ": " + error.what()).c_str());
