@@ -26,7 +26,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdint>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -82,12 +85,50 @@ struct MotionVectorScratchBuffers final {
 struct MotionVectorLumaCacheEntry final {
     int frameNumber;
     int stride;
+    int height;
+    bool building;
     std::shared_ptr<const std::vector<float>> luma;
 };
 
 struct MotionVectorLumaCache final {
     std::mutex mutex;
-    std::vector<MotionVectorLumaCacheEntry> entries;
+    std::condition_variable condition;
+    std::unordered_map<int, MotionVectorLumaCacheEntry> entries;
+    std::deque<int> lru;
+    size_t maxEntries;
+};
+
+struct SharedMotionVectorLumaCacheKey final {
+    uintptr_t sourceIdentity;
+    int width;
+    int height;
+    int bits;
+    bool convertedFromYUV;
+    std::string matrixIn;
+    std::string rangeIn;
+
+    bool operator==(const SharedMotionVectorLumaCacheKey& other) const noexcept {
+        return sourceIdentity == other.sourceIdentity &&
+               width == other.width &&
+               height == other.height &&
+               bits == other.bits &&
+               convertedFromYUV == other.convertedFromYUV &&
+               matrixIn == other.matrixIn &&
+               rangeIn == other.rangeIn;
+    }
+};
+
+struct SharedMotionVectorLumaCacheKeyHash final {
+    size_t operator()(const SharedMotionVectorLumaCacheKey& key) const noexcept {
+        size_t hash = std::hash<uintptr_t>{}(key.sourceIdentity);
+        hash ^= std::hash<int>{}(key.width) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<int>{}(key.height) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<int>{}(key.bits) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<bool>{}(key.convertedFromYUV) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<std::string>{}(key.matrixIn) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<std::string>{}(key.rangeIn) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        return hash;
+    }
 };
 
 namespace {
@@ -403,7 +444,7 @@ static const char* flowResizeModeName(const FlowResizeMode mode) noexcept {
 }
 
 static void printMotionVectorInvocation(const char* const functionName, const int gpuId, const int gpuThread,
-                                        const int sharedFlowInFlight, const float flowScale,
+                                        const int sharedFlowInFlight, const bool sharedLumaCache, const float flowScale,
                                         const FlowResizeMode flowResizeMode, const bool perfStats,
                                         const MotionVectorConfig& config, const float resScale,
                                         const int inferenceWidth, const int inferenceHeight,
@@ -415,6 +456,7 @@ static void printMotionVectorInvocation(const char* const functionName, const in
             << "[rmv] " << functionName << " parameters: gpu_id=" << gpuId
             << " gpu_thread=" << gpuThread
             << " shared_flow_inflight=" << sharedFlowInFlight
+            << " shared_luma_cache=" << sharedLumaCache
             << " flow_scale=" << flowScale
             << " res_scale=" << resScale
             << " cpu_flow_resize=" << flowResizeModeName(flowResizeMode)
@@ -701,6 +743,31 @@ static std::shared_ptr<std::counting_semaphore<>> acquireSharedFlowSemaphore(con
 
     auto created = std::make_shared<std::counting_semaphore<>>(capacity);
     semaphores[key] = created;
+    return created;
+}
+
+static std::shared_ptr<MotionVectorLumaCache> createMotionVectorLumaCache(const size_t maxEntries) {
+    auto cache = std::make_shared<MotionVectorLumaCache>();
+    cache->maxEntries = maxEntries;
+    return cache;
+}
+
+static std::shared_ptr<MotionVectorLumaCache> acquireSharedLumaCache(const SharedMotionVectorLumaCacheKey& key,
+                                                                     const size_t maxEntries) {
+    static std::mutex mutex;
+    static std::unordered_map<SharedMotionVectorLumaCacheKey,
+                              std::weak_ptr<MotionVectorLumaCache>,
+                              SharedMotionVectorLumaCacheKeyHash> caches;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = caches.find(key);
+    if (it != caches.end()) {
+        if (auto existing = it->second.lock())
+            return existing;
+    }
+
+    auto created = createMotionVectorLumaCache(maxEntries);
+    caches[key] = created;
     return created;
 }
 
@@ -1379,62 +1446,91 @@ static void buildFrameLumaPlane(const VSFrame* frame, const int width, const int
     }
 }
 
-static std::shared_ptr<const std::vector<float>> getCachedFrameLumaPlane(const std::shared_ptr<MotionVectorLumaCache>& cache,
-                                                                         const int frameNumber, const int stride,
-                                                                         const int height) {
-    if (!cache)
-        return nullptr;
-
-    const auto expectedSize = static_cast<size_t>(stride) * height;
-    std::lock_guard<std::mutex> lock(cache->mutex);
-    for (size_t i = 0; i < cache->entries.size(); i++) {
-        const auto& entry = cache->entries[i];
-        if (entry.frameNumber != frameNumber || entry.stride != stride || !entry.luma || entry.luma->size() != expectedSize)
+static void touchMotionVectorLumaCacheEntry(const std::shared_ptr<MotionVectorLumaCache>& cache,
+                                            const int frameNumber) {
+    for (auto it = cache->lru.begin(); it != cache->lru.end(); ++it) {
+        if (*it != frameNumber)
             continue;
 
-        auto luma = entry.luma;
-        if (i + 1 != cache->entries.size()) {
-            auto moved = cache->entries[i];
-            cache->entries.erase(cache->entries.begin() + static_cast<ptrdiff_t>(i));
-            cache->entries.push_back(std::move(moved));
-        }
-        return luma;
-    }
-
-    return nullptr;
-}
-
-static void storeCachedFrameLumaPlane(const std::shared_ptr<MotionVectorLumaCache>& cache, const int frameNumber,
-                                      const int stride, std::shared_ptr<const std::vector<float>> luma) {
-    if (!cache || !luma)
-        return;
-
-    std::lock_guard<std::mutex> lock(cache->mutex);
-    for (size_t i = 0; i < cache->entries.size(); i++) {
-        if (cache->entries[i].frameNumber != frameNumber)
-            continue;
-
-        cache->entries.erase(cache->entries.begin() + static_cast<ptrdiff_t>(i));
+        cache->lru.erase(it);
         break;
     }
 
-    cache->entries.push_back({ frameNumber, stride, std::move(luma) });
-    constexpr size_t MaxCachedFrames = 4;
-    if (cache->entries.size() > MaxCachedFrames)
-        cache->entries.erase(cache->entries.begin());
+    cache->lru.push_back(frameNumber);
+}
+
+static void pruneMotionVectorLumaCache(const std::shared_ptr<MotionVectorLumaCache>& cache) {
+    while (cache->entries.size() > cache->maxEntries && !cache->lru.empty()) {
+        const auto frameNumber = cache->lru.front();
+        cache->lru.pop_front();
+        const auto it = cache->entries.find(frameNumber);
+        if (it == cache->entries.end())
+            continue;
+
+        if (it->second.building) {
+            cache->lru.push_back(frameNumber);
+            break;
+        }
+
+        cache->entries.erase(it);
+    }
 }
 
 static std::shared_ptr<const std::vector<float>> getOrCreateFrameLumaPlane(const std::shared_ptr<MotionVectorLumaCache>& cache,
                                                                             const VSFrame* frame, const int frameNumber,
                                                                             const int width, const int height, const int stride,
                                                                             const double maxSample, const VSAPI* vsapi) {
-    if (auto cached = getCachedFrameLumaPlane(cache, frameNumber, stride, height))
-        return cached;
+    if (!cache) {
+        auto luma = std::make_shared<std::vector<float>>();
+        buildFrameLumaPlane(frame, width, height, stride, *luma, maxSample, vsapi);
+        return luma;
+    }
 
-    auto luma = std::make_shared<std::vector<float>>();
-    buildFrameLumaPlane(frame, width, height, stride, *luma, maxSample, vsapi);
-    storeCachedFrameLumaPlane(cache, frameNumber, stride, luma);
-    return luma;
+    const auto expectedSize = static_cast<size_t>(stride) * height;
+    while (true) {
+        std::unique_lock<std::mutex> lock(cache->mutex);
+        auto& entry = cache->entries[frameNumber];
+
+        if (entry.luma && !entry.building &&
+            entry.stride == stride &&
+            entry.height == height &&
+            entry.luma->size() == expectedSize) {
+            auto luma = entry.luma;
+            touchMotionVectorLumaCacheEntry(cache, frameNumber);
+            return luma;
+        }
+
+        if (entry.building) {
+            cache->condition.wait(lock, [&]() {
+                const auto it = cache->entries.find(frameNumber);
+                return it == cache->entries.end() || !it->second.building;
+            });
+            continue;
+        }
+
+        entry.frameNumber = frameNumber;
+        entry.stride = stride;
+        entry.height = height;
+        entry.building = true;
+        entry.luma.reset();
+        lock.unlock();
+
+        auto luma = std::make_shared<std::vector<float>>();
+        buildFrameLumaPlane(frame, width, height, stride, *luma, maxSample, vsapi);
+
+        lock.lock();
+        auto& stored = cache->entries[frameNumber];
+        stored.frameNumber = frameNumber;
+        stored.stride = stride;
+        stored.height = height;
+        stored.building = false;
+        stored.luma = luma;
+        touchMotionVectorLumaCacheEntry(cache, frameNumber);
+        pruneMotionVectorLumaCache(cache);
+        lock.unlock();
+        cache->condition.notify_all();
+        return luma;
+    }
 }
 
 static SADContext makeSADContext(const VSFrame* current, const VSFrame* reference, const MotionVectorExportContext& ctx,
@@ -2518,6 +2614,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
+        const auto sharedLumaSourceIdentity = reinterpret_cast<uintptr_t>(pairData->node);
         pairData->vi = *vsapi->getVideoInfo(pairData->node);
         const auto sourceVi = pairData->vi;
         bool sourceConverted{};
@@ -2542,6 +2639,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             gpuThread = 2;
         auto sharedFlowInFlight{ vsapi->mapGetIntSaturated(in, "shared_flow_inflight", 0, &err) };
         const auto sharedFlowInFlightSpecified = !err;
+        auto sharedLumaCacheEnabled = !!vsapi->mapGetInt(in, "shared_luma_cache", 0, &err);
+        if (err)
+            sharedLumaCacheEnabled = true;
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
         if (err)
@@ -2686,7 +2786,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, mvDelta,
                                   mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
-        printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, flowScale, flowResizeMode,
+        printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
                                     perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, true);
 
@@ -2701,7 +2801,21 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
         pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
-        pairData->lumaCache = std::make_shared<MotionVectorLumaCache>();
+        if (sharedLumaCacheEnabled) {
+            SharedMotionVectorLumaCacheKey key{};
+            key.sourceIdentity = sharedLumaSourceIdentity;
+            key.width = clipSet.sourceVi.width;
+            key.height = clipSet.sourceVi.height;
+            key.bits = mvBits;
+            key.convertedFromYUV = sourceConverted;
+            if (sourceConverted) {
+                key.matrixIn = matrixIn;
+                key.rangeIn = rangeIn;
+            }
+            pairData->lumaCache = acquireSharedLumaCache(key, 16);
+        } else {
+            pairData->lumaCache = createMotionVectorLumaCache(4);
+        }
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -2811,6 +2925,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
+        const auto sharedLumaSourceIdentity = reinterpret_cast<uintptr_t>(pairData->node);
         pairData->vi = *vsapi->getVideoInfo(pairData->node);
         const auto sourceVi = pairData->vi;
         bool sourceConverted{};
@@ -2833,6 +2948,9 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
             gpuThread = 2;
         auto sharedFlowInFlight{ vsapi->mapGetIntSaturated(in, "shared_flow_inflight", 0, &err) };
         const auto sharedFlowInFlightSpecified = !err;
+        auto sharedLumaCacheEnabled = !!vsapi->mapGetInt(in, "shared_luma_cache", 0, &err);
+        if (err)
+            sharedLumaCacheEnabled = true;
         const auto perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
@@ -2978,7 +3096,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
                                                             mvOverlapX, mvOverlapY, mvPel, delta,
                                                             mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         }
-        printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, flowScale, flowResizeMode,
+        printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
                                     perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, false);
 
@@ -2994,7 +3112,21 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
         pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
-        pairData->lumaCache = std::make_shared<MotionVectorLumaCache>();
+        if (sharedLumaCacheEnabled) {
+            SharedMotionVectorLumaCacheKey key{};
+            key.sourceIdentity = sharedLumaSourceIdentity;
+            key.width = clipSet.sourceVi.width;
+            key.height = clipSet.sourceVi.height;
+            key.bits = mvBits;
+            key.convertedFromYUV = sourceConverted;
+            if (sourceConverted) {
+                key.matrixIn = matrixIn;
+                key.rangeIn = rangeIn;
+            }
+            pairData->lumaCache = acquireSharedLumaCache(key, 16);
+        } else {
+            pairData->lumaCache = createMotionVectorLumaCache(4);
+        }
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -3122,6 +3254,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
+                             "shared_luma_cache:int:opt;"
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
@@ -3152,6 +3285,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
+                             "shared_luma_cache:int:opt;"
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
@@ -3181,6 +3315,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
+                             "shared_luma_cache:int:opt;"
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"

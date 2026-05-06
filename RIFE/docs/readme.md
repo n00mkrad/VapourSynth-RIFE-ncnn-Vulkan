@@ -70,6 +70,15 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Lower values can reduce CPU contention; higher values can increase throughput on some setups.
   When explicitly set, local admission is relaxed to at least this value (`max(gpu_thread, shared_flow_inflight)`) so the shared cap remains the primary limiter.
 
+- `shared_luma_cache`
+  Controls whether source-frame luma planes are shared across compatible filter instances.
+  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
+  Default: `True`.
+  `True` / `1` enables automatic sharing for the same logical source clip when synthetic SAD is computed from luma.
+  `False` / `0` disables cross-instance sharing and keeps only the local per-instance cache.
+  This is only relevant when `chroma=0`.
+  Automatic sharing is additionally scoped by the source clip identity, `bits`, and, for YUV input, `matrix_in_s` and `range_in_s`.
+
 - `blksize_x`, `blksize_y`
   Exported MVTools block size on each axis.
   Default: `blksize_x=16`, `blksize_y=blksize_x`.
@@ -146,7 +155,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
