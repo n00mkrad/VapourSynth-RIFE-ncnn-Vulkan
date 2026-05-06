@@ -36,10 +36,10 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - Motion-vector APIs accept either constant-format `RGBS` or constant-format `YUV`. Non-`RGBS` `YUV` input is converted internally to `RGBS` for RIFE inference.
 - MVTools usually operates on a different clip, often `YUV420P8`. `meta_clip` is still optional and can be used explicitly as the metadata source.
 - If the input is non-`RGBS` and `meta_clip` is omitted, the plugin now uses the original input clip as the metadata source automatically.
-- Vector clips are `Gray8` carrier clips. The motion data still lives in frame properties, and the pixel plane now contains a SAD mask derived from the exported block SADs for that direction.
-- By default the SAD carrier mask is relative: it maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
-- If `abs_sad_clip_range > 0`, the carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
-- Frames without a valid reference still export invalid MVTools vectors as before. In relative mode their carrier mask is solid `255`; in absolute mode it shows the clipped sentinel SAD, which will usually also be `255`.
+- Vector clips are `Gray8` carrier clips. The motion data still lives in frame properties. By default the pixel plane contains a SAD mask derived from the exported block SADs for that direction, and `render_sad_mask=False` leaves that plane black instead.
+- By default the rendered SAD carrier mask is relative: it maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
+- If `abs_sad_clip_range > 0`, the rendered carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
+- Frames without a valid reference still export invalid MVTools vectors as before. When the SAD mask is rendered, relative mode makes it solid `255` and absolute mode shows the clipped sentinel SAD, which will usually also be `255`.
 - Exported motion-vector frames also include `RMV_AvgSad` as an integer 8x8-equivalent average SAD in MVTools threshold space, `RMV_AvgSadNorm` as an integer frame property preserving the previous raw average exported block SAD behavior, `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, `RMV_AvgSadHigh50Pct`, `RMV_AvgSadHigh75Pct`, `RMV_AvgSadLow2Pct`, `RMV_AvgSadLow10Pct`, `RMV_AvgSadLow25Pct`, `RMV_MaxSad`, `RMV_MinSad`, and `RMV_SadAvgDeviation` as integer 8x8-equivalent SAD summary properties, plus `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` as float frame properties. `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
@@ -106,6 +106,12 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Values greater than `0` enable absolute mode, where the carrier starts at SAD `0`, clips at the requested upper bound, and uses the available `Gray8` precision to quantize that range.
   Examples: `1024` gives steps of `4`, `2048` gives steps of `8`, `4096` gives steps of `16`.
 
+- `render_sad_mask`
+  Controls whether the `Gray8` carrier plane is populated with the direction-specific SAD mask.
+  Default: `True`.
+  If disabled, the carrier plane is left black while all MVTools frame properties and exported `RMV_*` stats remain unchanged.
+  This can reduce CPU overhead when downstream consumers only need the frame properties.
+
 - `meta_clip`
   Metadata-source clip for MVTools compatibility.
   This should usually be the actual clip you will feed to MVTools, for example the original `YUV420P8` source.
@@ -140,7 +146,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -165,6 +171,7 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - `semaphore_wait_ms` total wait
 - `local_wait_ms` wait on per-filter `gpu_thread` limiter
 - `shared_wait_ms` wait on the cross-instance `shared_flow_inflight` limiter
+- `render_sad_mask_ms` time spent rasterizing the `Gray8` SAD carrier plane when `render_sad_mask=True`
 
 `sad_multiplier`:
 - positive float, default `1.0`

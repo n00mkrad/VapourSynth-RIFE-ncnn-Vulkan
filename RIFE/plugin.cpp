@@ -2030,7 +2030,7 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
         } else {
             return createMotionVectorFrame(d->vi, d->analysisData, d->invalidBlob.data(),
                                            static_cast<int>(d->invalidBlob.size()), d->invalidStats,
-                                           d->absSadClipRange, core, vsapi);
+                                           d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
         }
     } else if (activationReason == arAllFramesReady) {
         const auto outputStartNs = d->perfStats ? monotonicNowNs() : 0;
@@ -2052,7 +2052,8 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
             vectorBlobSize = static_cast<int>(d->invalidBlob.size());
         }
 
-        auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, stats, d->absSadClipRange, core, vsapi);
+        auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, stats,
+                                           d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
 
         vsapi->freeFrame(pairFrame);
         if (d->perfStats) {
@@ -2211,7 +2212,8 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
     const auto delta = d->analysisData.nDeltaFrame;
     const auto valid = d->backward ? n + delta < d->vi.numFrames : n >= delta;
     const auto createInvalidFrame = [&]() {
-        return createMotionVectorFrame(d->vi, d->analysisData, d->invalidBlob.data(), static_cast<int>(d->invalidBlob.size()), d->invalidStats, d->absSadClipRange, core, vsapi);
+        return createMotionVectorFrame(d->vi, d->analysisData, d->invalidBlob.data(), static_cast<int>(d->invalidBlob.size()), d->invalidStats,
+                                       d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
     };
 
     if (activationReason == arInitial) {
@@ -2270,7 +2272,8 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
             }
 
             const auto stats = getMotionVectorInternalFrameStats(props, d->backward, vsapi);
-            auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, stats, d->absSadClipRange, core, vsapi);
+            auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, stats,
+                                               d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
             cleanup();
             if (d->perfStats) {
                 accumulatePerfStat(d->perf->outputFrames, 1);
@@ -2309,7 +2312,8 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
         if (d->perfStats)
             accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
 
-        auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob.data(), static_cast<int>(vectorBlob.size()), stats, d->absSadClipRange, core, vsapi);
+        auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob.data(), static_cast<int>(vectorBlob.size()), stats,
+                                           d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
         cleanup();
         if (d->perfStats) {
             accumulatePerfStat(d->perf->outputFrames, 1);
@@ -2658,6 +2662,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
     std::vector<MotionVectorConfig> outputConfigs(maxDelta + 1);
     std::vector<VSNode*> outputNodes;
     int mvAbsSADClipRange{};
+    bool mvRenderSadMask{ true };
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
@@ -2720,6 +2725,9 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         mvAbsSADClipRange = vsapi->mapGetIntSaturated(in, "abs_sad_clip_range", 0, &err);
         if (err)
             mvAbsSADClipRange = 0;
+        mvRenderSadMask = !!vsapi->mapGetInt(in, "render_sad_mask", 0, &err);
+        if (err)
+            mvRenderSadMask = true;
         auto mvSadMultiplier{ vsapi->mapGetFloat(in, "sad_multiplier", 0, &err) };
         if (err)
             mvSadMultiplier = 1.0;
@@ -2827,7 +2835,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         }
         printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, flowScale, flowResizeMode,
                                     perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
-                                    mvAbsSADClipRange, matrixIn, rangeIn, false);
+                                    mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, false);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
             throw "failed to create output format";
@@ -2898,6 +2906,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         outputData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, backward, &outputData->invalidStats);
         outputData->absSadClipRange = mvAbsSADClipRange;
         outputData->backward = backward;
+        outputData->renderSadMask = mvRenderSadMask;
         outputData->perfStats = approxPerfStats;
         outputData->perf = approxPerf;
         VSFilterDependency deps[]{ { outputData->node, rpGeneral }, { outputData->sourceNode, rpGeneral } };
@@ -2979,6 +2988,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "delta:int:opt;"
                              "bits:int:opt;"
                              "abs_sad_clip_range:int:opt;"
+                             "render_sad_mask:int:opt;"
                              "sad_multiplier:float:opt;"
                              "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
@@ -3007,6 +3017,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "pel:int:opt;"
                              "bits:int:opt;"
                              "abs_sad_clip_range:int:opt;"
+                             "render_sad_mask:int:opt;"
                              "sad_multiplier:float:opt;"
                              "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
@@ -3035,6 +3046,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "pel:int:opt;"
                              "bits:int:opt;"
                              "abs_sad_clip_range:int:opt;"
+                             "render_sad_mask:int:opt;"
                              "sad_multiplier:float:opt;"
                              "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
