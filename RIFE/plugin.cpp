@@ -73,12 +73,21 @@ struct MotionVectorPerfStats final {
 
 struct MotionVectorScratchBuffers final {
     std::vector<float> flow;
-    std::vector<float> currentLuma;
-    std::vector<float> referenceLuma;
     std::vector<float> backwardDisplacement;
     std::vector<float> forwardDisplacement;
     std::vector<float> composedX;
     std::vector<float> composedY;
+};
+
+struct MotionVectorLumaCacheEntry final {
+    int frameNumber;
+    int stride;
+    std::shared_ptr<const std::vector<float>> luma;
+};
+
+struct MotionVectorLumaCache final {
+    std::mutex mutex;
+    std::vector<MotionVectorLumaCacheEntry> entries;
 };
 
 namespace {
@@ -1253,6 +1262,7 @@ struct RIFEMVPairData final {
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
     std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
+    std::shared_ptr<MotionVectorLumaCache> lumaCache;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -1279,6 +1289,7 @@ struct RIFEMVApproxPairData final {
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
     std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
+    std::shared_ptr<MotionVectorLumaCache> lumaCache;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -1366,6 +1377,64 @@ static void buildFrameLumaPlane(const VSFrame* frame, const int width, const int
                                                      quantizeSyntheticSample(planeB[idx], maxSample)));
         }
     }
+}
+
+static std::shared_ptr<const std::vector<float>> getCachedFrameLumaPlane(const std::shared_ptr<MotionVectorLumaCache>& cache,
+                                                                         const int frameNumber, const int stride,
+                                                                         const int height) {
+    if (!cache)
+        return nullptr;
+
+    const auto expectedSize = static_cast<size_t>(stride) * height;
+    std::lock_guard<std::mutex> lock(cache->mutex);
+    for (size_t i = 0; i < cache->entries.size(); i++) {
+        const auto& entry = cache->entries[i];
+        if (entry.frameNumber != frameNumber || entry.stride != stride || !entry.luma || entry.luma->size() != expectedSize)
+            continue;
+
+        auto luma = entry.luma;
+        if (i + 1 != cache->entries.size()) {
+            auto moved = cache->entries[i];
+            cache->entries.erase(cache->entries.begin() + static_cast<ptrdiff_t>(i));
+            cache->entries.push_back(std::move(moved));
+        }
+        return luma;
+    }
+
+    return nullptr;
+}
+
+static void storeCachedFrameLumaPlane(const std::shared_ptr<MotionVectorLumaCache>& cache, const int frameNumber,
+                                      const int stride, std::shared_ptr<const std::vector<float>> luma) {
+    if (!cache || !luma)
+        return;
+
+    std::lock_guard<std::mutex> lock(cache->mutex);
+    for (size_t i = 0; i < cache->entries.size(); i++) {
+        if (cache->entries[i].frameNumber != frameNumber)
+            continue;
+
+        cache->entries.erase(cache->entries.begin() + static_cast<ptrdiff_t>(i));
+        break;
+    }
+
+    cache->entries.push_back({ frameNumber, stride, std::move(luma) });
+    constexpr size_t MaxCachedFrames = 4;
+    if (cache->entries.size() > MaxCachedFrames)
+        cache->entries.erase(cache->entries.begin());
+}
+
+static std::shared_ptr<const std::vector<float>> getOrCreateFrameLumaPlane(const std::shared_ptr<MotionVectorLumaCache>& cache,
+                                                                            const VSFrame* frame, const int frameNumber,
+                                                                            const int width, const int height, const int stride,
+                                                                            const double maxSample, const VSAPI* vsapi) {
+    if (auto cached = getCachedFrameLumaPlane(cache, frameNumber, stride, height))
+        return cached;
+
+    auto luma = std::make_shared<std::vector<float>>();
+    buildFrameLumaPlane(frame, width, height, stride, *luma, maxSample, vsapi);
+    storeCachedFrameLumaPlane(cache, frameNumber, stride, luma);
+    return luma;
 }
 
 static SADContext makeSADContext(const VSFrame* current, const VSFrame* reference, const MotionVectorExportContext& ctx,
@@ -1725,6 +1794,79 @@ static std::vector<char> buildMotionVectorBlobFromConfig(const VSFrame* current,
                                   currentLumaCache, referenceLumaCache, stats);
 }
 
+static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFrame* reference, const float* flow,
+                                             const int flowWidth, const int flowHeight,
+                                             const bool valid, const MotionVectorConfig& config, const VSAPI* vsapi,
+                                             const std::vector<float>* currentLumaCache,
+                                             const std::vector<float>* referenceLumaCache,
+                                             std::vector<char>& backwardBlob, std::vector<char>& forwardBlob,
+                                             MotionVectorFrameStats* const backwardStats = nullptr,
+                                             MotionVectorFrameStats* const forwardStats = nullptr) {
+    const auto backwardCtx = createMotionVectorExportContext(config, true);
+    const auto forwardCtx = createMotionVectorExportContext(config, false);
+    const auto vectorCount = static_cast<size_t>(backwardCtx.blkX) * backwardCtx.blkY;
+    std::vector<MVToolsVector> backwardVectors(vectorCount);
+    std::vector<MVToolsVector> forwardVectors(vectorCount);
+
+    if (!valid) {
+        for (size_t i = 0; i < vectorCount; i++) {
+            backwardVectors[i] = { 0, 0, backwardCtx.invalidSad };
+            forwardVectors[i] = { 0, 0, forwardCtx.invalidSad };
+        }
+
+        backwardBlob = packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardStats);
+        forwardBlob = packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardStats);
+        return;
+    }
+
+    const auto width = vsapi->getFrameWidth(current, 0);
+    const auto height = vsapi->getFrameHeight(current, 0);
+    const auto currentLumaPtr = currentLumaCache ? currentLumaCache->data() : nullptr;
+    const auto referenceLumaPtr = referenceLumaCache ? referenceLumaCache->data() : nullptr;
+    const auto backwardSadContext = makeSADContext(current, reference, backwardCtx, vsapi, currentLumaPtr, referenceLumaPtr);
+    const auto forwardSadContext = makeSADContext(reference, current, forwardCtx, vsapi, referenceLumaPtr, currentLumaPtr);
+    const auto flowPlaneSize = flowWidth * flowHeight;
+    const auto* backwardFlowXPlane = flow + flowPlaneSize * 0;
+    const auto* backwardFlowYPlane = flow + flowPlaneSize * 1;
+    const auto* forwardFlowXPlane = flow + flowPlaneSize * 2;
+    const auto* forwardFlowYPlane = flow + flowPlaneSize * 3;
+
+    for (auto by = 0; by < backwardCtx.blkY; by++) {
+        const auto blockY = by * backwardCtx.stepY - backwardCtx.vPadding;
+        const auto internalBlockY = by * backwardCtx.internalStepY - backwardCtx.internalVPadding;
+        for (auto bx = 0; bx < backwardCtx.blkX; bx++) {
+            const auto blockX = bx * backwardCtx.stepX - backwardCtx.hPadding;
+            const auto internalBlockX = bx * backwardCtx.internalStepX - backwardCtx.internalHPadding;
+            const auto vectorIndex = static_cast<size_t>(by) * backwardCtx.blkX + bx;
+            auto& backwardVector = backwardVectors[vectorIndex];
+            auto& forwardVector = forwardVectors[vectorIndex];
+
+            const auto backwardFlowX = reduceBlockFlow(backwardFlowXPlane, flowWidth, flowHeight, internalBlockX, internalBlockY, backwardCtx);
+            const auto backwardFlowY = reduceBlockFlow(backwardFlowYPlane, flowWidth, flowHeight, internalBlockX, internalBlockY, backwardCtx);
+            backwardVector.x = static_cast<int>(std::lround(-2.0f * backwardFlowX * backwardCtx.motionScaleX * backwardCtx.pel));
+            backwardVector.y = static_cast<int>(std::lround(-2.0f * backwardFlowY * backwardCtx.motionScaleY * backwardCtx.pel));
+            backwardVector.x = clampMotionVectorComponent(backwardVector.x, backwardCtx.pel, blockX, backwardCtx.blockSizeX, width, backwardCtx.hPadding);
+            backwardVector.y = clampMotionVectorComponent(backwardVector.y, backwardCtx.pel, blockY, backwardCtx.blockSizeY, height, backwardCtx.vPadding);
+            const auto backwardPixelDx = static_cast<int>(std::lround(static_cast<double>(backwardVector.x) / backwardCtx.pel));
+            const auto backwardPixelDy = static_cast<int>(std::lround(static_cast<double>(backwardVector.y) / backwardCtx.pel));
+            backwardVector.sad = computeBlockSAD(backwardSadContext, backwardPixelDx, backwardPixelDy, blockX, blockY);
+
+            const auto forwardFlowX = reduceBlockFlow(forwardFlowXPlane, flowWidth, flowHeight, internalBlockX, internalBlockY, forwardCtx);
+            const auto forwardFlowY = reduceBlockFlow(forwardFlowYPlane, flowWidth, flowHeight, internalBlockX, internalBlockY, forwardCtx);
+            forwardVector.x = static_cast<int>(std::lround(-2.0f * forwardFlowX * forwardCtx.motionScaleX * forwardCtx.pel));
+            forwardVector.y = static_cast<int>(std::lround(-2.0f * forwardFlowY * forwardCtx.motionScaleY * forwardCtx.pel));
+            forwardVector.x = clampMotionVectorComponent(forwardVector.x, forwardCtx.pel, blockX, forwardCtx.blockSizeX, width, forwardCtx.hPadding);
+            forwardVector.y = clampMotionVectorComponent(forwardVector.y, forwardCtx.pel, blockY, forwardCtx.blockSizeY, height, forwardCtx.vPadding);
+            const auto forwardPixelDx = static_cast<int>(std::lround(static_cast<double>(forwardVector.x) / forwardCtx.pel));
+            const auto forwardPixelDy = static_cast<int>(std::lround(static_cast<double>(forwardVector.y) / forwardCtx.pel));
+            forwardVector.sad = computeBlockSAD(forwardSadContext, forwardPixelDx, forwardPixelDy, blockX, blockY);
+        }
+    }
+
+    backwardBlob = packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardStats);
+    forwardBlob = packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardStats);
+}
+
 static std::vector<char> buildInvalidMotionVectorBlob(const MotionVectorConfig& config, const bool backward,
                                                       MotionVectorFrameStats* const stats = nullptr) {
     return buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, config, backward, nullptr, nullptr, nullptr, stats);
@@ -1930,6 +2072,8 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             auto& scratch = getMotionVectorScratchBuffers();
             const auto flowSize = static_cast<size_t>(width) * height * 4;
             scratch.flow.resize(flowSize);
+            std::shared_ptr<const std::vector<float>> currentLumaPlane;
+            std::shared_ptr<const std::vector<float>> referenceLumaPlane;
             const std::vector<float>* currentLumaCache = nullptr;
             const std::vector<float>* referenceLumaCache = nullptr;
             const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
@@ -1979,19 +2123,18 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                 const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
                 const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
                 const auto sourceStride = static_cast<int>(vsapi->getStride(currentSource, 0) / vsapi->getVideoFrameFormat(currentSource)->bytesPerSample);
-                buildFrameLumaPlane(currentSource, sourceWidth, sourceHeight, sourceStride, scratch.currentLuma, static_cast<double>((1ULL << d->mvConfig.bits) - 1ULL), vsapi);
-                buildFrameLumaPlane(referenceSource, sourceWidth, sourceHeight, sourceStride, scratch.referenceLuma, static_cast<double>((1ULL << d->mvConfig.bits) - 1ULL), vsapi);
-                currentLumaCache = &scratch.currentLuma;
-                referenceLumaCache = &scratch.referenceLuma;
+                const auto maxSample = static_cast<double>((1ULL << d->mvConfig.bits) - 1ULL);
+                currentLumaPlane = getOrCreateFrameLumaPlane(d->lumaCache, currentSource, n, sourceWidth, sourceHeight, sourceStride, maxSample, vsapi);
+                referenceLumaPlane = getOrCreateFrameLumaPlane(d->lumaCache, referenceSource, n + delta, sourceWidth, sourceHeight, sourceStride, maxSample, vsapi);
+                currentLumaCache = currentLumaPlane.get();
+                referenceLumaCache = referenceLumaPlane.get();
                 if (d->perfStats)
                     accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
-            backwardBlob = buildMotionVectorBlobFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, true, vsapi,
-                                                           currentLumaCache, referenceLumaCache, &backwardStats);
-            forwardBlob = buildMotionVectorBlobFromConfig(referenceSource, currentSource, scratch.flow.data(), width, height, true, d->mvConfig, false, vsapi,
-                                                          referenceLumaCache, currentLumaCache, &forwardStats);
+            buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
+                                             currentLumaCache, referenceLumaCache, backwardBlob, forwardBlob, &backwardStats, &forwardStats);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
         } else {
@@ -2104,6 +2247,8 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
             const auto flowSize = static_cast<size_t>(width) * height * 4;
             scratch.flow.resize(flowSize);
+            std::shared_ptr<const std::vector<float>> currentLumaPlane;
+            std::shared_ptr<const std::vector<float>> referenceLumaPlane;
             const std::vector<float>* currentLumaCache = nullptr;
             const std::vector<float>* referenceLumaCache = nullptr;
             const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
@@ -2153,19 +2298,18 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
                 const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
                 const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
                 const auto sourceStride = static_cast<int>(vsapi->getStride(currentSource, 0) / vsapi->getVideoFrameFormat(currentSource)->bytesPerSample);
-                buildFrameLumaPlane(currentSource, sourceWidth, sourceHeight, sourceStride, scratch.currentLuma, static_cast<double>((1ULL << d->mvConfig.bits) - 1ULL), vsapi);
-                buildFrameLumaPlane(referenceSource, sourceWidth, sourceHeight, sourceStride, scratch.referenceLuma, static_cast<double>((1ULL << d->mvConfig.bits) - 1ULL), vsapi);
-                currentLumaCache = &scratch.currentLuma;
-                referenceLumaCache = &scratch.referenceLuma;
+                const auto maxSample = static_cast<double>((1ULL << d->mvConfig.bits) - 1ULL);
+                currentLumaPlane = getOrCreateFrameLumaPlane(d->lumaCache, currentSource, n, sourceWidth, sourceHeight, sourceStride, maxSample, vsapi);
+                referenceLumaPlane = getOrCreateFrameLumaPlane(d->lumaCache, referenceSource, n + 1, sourceWidth, sourceHeight, sourceStride, maxSample, vsapi);
+                currentLumaCache = currentLumaPlane.get();
+                referenceLumaCache = referenceLumaPlane.get();
                 if (d->perfStats)
                     accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
-            backwardBlob = buildMotionVectorBlobFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, true, vsapi,
-                                                           currentLumaCache, referenceLumaCache, &backwardStats);
-            forwardBlob = buildMotionVectorBlobFromConfig(referenceSource, currentSource, scratch.flow.data(), width, height, true, d->mvConfig, false, vsapi,
-                                                          referenceLumaCache, currentLumaCache, &forwardStats);
+            buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
+                                             currentLumaCache, referenceLumaCache, backwardBlob, forwardBlob, &backwardStats, &forwardStats);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
             const auto displacementBuildStartNs = d->perfStats ? monotonicNowNs() : 0;
@@ -2557,6 +2701,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
         pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
+        pairData->lumaCache = std::make_shared<MotionVectorLumaCache>();
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -2849,6 +2994,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
         pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
+        pairData->lumaCache = std::make_shared<MotionVectorLumaCache>();
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
