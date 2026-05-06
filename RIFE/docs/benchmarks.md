@@ -83,3 +83,95 @@ RTX 4090 (2 GPU threads per instance = 4 threads total) - Note that the GPU was 
 | rife-v4.13_lite_ensembleTrue | — |
 | rife-v4.20_ensembleTrue | — |
 | rife-v4.25_ensembleFalse | — |
+
+### Model Quality Ranking
+
+Candidates are the 20 fastest models (from [Model Speed Ranking](#model-speed-ranking)).
+
+#### Average SAD
+
+Best to worst, based on average Sum of Absolute Differences (SAD):
+Use case: **Temporal denoising (`mv.Degrain`)**, where ignoring grain and tracking reliable block structures is critical.
+
+| Model Name | Avg SAD | Avg SAD 10% High |
+|---|---|---|
+| rife-v4.2_ensembleFalse_fastTrue | 420.89 | 1060.34 |
+| rife-v3.1 | 421.81 | 1084.24 |
+| rife-v4.3_ensembleFalse_fastTrue | 426.43 | 1093.52 |
+| rife-v4.4_ensembleFalse_fastTrue | 427.55 | 1094.64 |
+| rife-v4.13_lite_ensembleFalse | 431.16 | 1121.31 |
+| rife-v4.12_lite_ensembleFalse | 431.43 | 1102.69 |
+| rife-v4.13_ensembleFalse | 432.24 | 1136.22 |
+| rife-v4.15_lite_ensembleFalse | 433.65 | 1150.02 |
+| rife-v4.15_ensembleFalse | 433.74 | 1158.37 |
+| rife-v4.14_ensembleFalse | 433.79 | 1159.71 |
+| rife-v4.16_lite_ensembleFalse | 433.96 | 1149.98 |
+| rife-v4.22_lite_ensembleFalse | 434.53 | 1131.20 |
+| rife-v4.18_ensembleFalse | 437.57 | 1163.27 |
+| rife-v4.18 | 437.57 | 1163.27 |
+| rife-v4.6_ensembleFalse | 437.65 | 1147.22 |
+| rife-v4.20_ensembleFalse | 438.01 | 1157.39 |
+| rife-v4.17_ensembleFalse | 439.02 | 1156.32 |
+| rife-v4.24_ensembleFalse | 442.83 | 1142.34 |
+| rife-v4.5_ensembleFalse | 454.54 | 1200.64 |
+| rife-v4.17_lite_ensembleFalse | 462.04 | 1214.62 |
+
+
+#### Flow MAE
+
+Best to worst, using `mv.Flow` reconstruction of frames using their neighbors, by Mean Absolute Error (MAE).
+
+Use case: **Pixel-level interpolation and framerate conversion (`mv.Flow`)**, where reproducing exact pixel values (even if it means overfitting to noise/grain) is mathematically rewarded.
+
+| Model Name | Dense MAE |
+|---|---|
+| rife-v4.17_lite_ensembleFalse | 0.0603 |
+| rife-v4.5_ensembleFalse | 0.0635 |
+| rife-v4.24_ensembleFalse | 0.0649 |
+| rife-v4.6_ensembleFalse | 0.0657 |
+| rife-v4.17_ensembleFalse | 0.0659 |
+| rife-v4.12_lite_ensembleFalse | 0.0661 |
+| rife-v4.20_ensembleFalse | 0.0661 |
+| rife-v4.18_ensembleFalse | 0.0663 |
+| rife-v4.18 | 0.0663 |
+| rife-v4.22_lite_ensembleFalse | 0.0666 |
+| rife-v4.13_lite_ensembleFalse | 0.0667 |
+| rife-v4.16_lite_ensembleFalse | 0.0668 |
+| rife-v4.15_lite_ensembleFalse | 0.0670 |
+| rife-v4.14_ensembleFalse | 0.0670 |
+| rife-v4.13_ensembleFalse | 0.0671 |
+| rife-v4.3_ensembleFalse_fastTrue | 0.0673 |
+| rife-v4.4_ensembleFalse_fastTrue | 0.0673 |
+| rife-v4.15_ensembleFalse | 0.0673 |
+| rife-v4.2_ensembleFalse_fastTrue | 0.0677 |
+| rife-v3.1 | 0.0678 |
+
+
+#### Compensate MAE
+
+Best to worst, using `mv.Compensate` reconstruction of frames using their neighbors, by Mean Absolute Error (MAE).
+
+Use case: **Block-based compensation (`mv.Compensate`)** and real-world block SAD validation, as this cleanly ships whole, un-smeared grained structures compared to Flow.
+
+| Model Name | Dense MAE |
+|---|---|
+| rife-v4.2_ensembleFalse_fastTrue | 0.0180 |
+| rife-v4.3_ensembleFalse_fastTrue | 0.0181 |
+| rife-v4.4_ensembleFalse_fastTrue | 0.0182 |
+| rife-v4.17_lite_ensembleFalse | 0.0182 |
+| rife-v4.12_lite_ensembleFalse | 0.0183 |
+| rife-v4.13_lite_ensembleFalse | 0.0184 |
+| rife-v4.13_ensembleFalse | 0.0186 |
+| rife-v4.15_lite_ensembleFalse | 0.0186 |
+| rife-v4.14_ensembleFalse | 0.0186 |
+| rife-v4.16_lite_ensembleFalse | 0.0186 |
+| rife-v4.6_ensembleFalse | 0.0186 |
+| rife-v3.1 | 0.0187 |
+| rife-v4.15_ensembleFalse | 0.0187 |
+| rife-v4.18 | 0.0187 |
+| rife-v4.18_ensembleFalse | 0.0187 |
+| rife-v4.17_ensembleFalse | 0.0187 |
+| rife-v4.24_ensembleFalse | 0.0187 |
+| rife-v4.5_ensembleFalse | 0.0187 |
+| rife-v4.22_lite_ensembleFalse | 0.0188 |
+| rife-v4.20_ensembleFalse | 0.0188 |
