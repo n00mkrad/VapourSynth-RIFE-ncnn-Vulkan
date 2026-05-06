@@ -74,14 +74,6 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> composeNs{ 0 };
 };
 
-struct MotionVectorScratchBuffers final {
-    std::vector<float> flow;
-    std::vector<float> backwardDisplacement;
-    std::vector<float> forwardDisplacement;
-    std::vector<float> composedX;
-    std::vector<float> composedY;
-};
-
 struct MotionVectorLumaCacheEntry final {
     int frameNumber;
     int stride;
@@ -201,6 +193,18 @@ struct MVToolsVector final {
     int x;
     int y;
     int64_t sad;
+};
+
+struct MotionVectorScratchBuffers final {
+    std::vector<float> flow;
+    std::vector<float> backwardDisplacement;
+    std::vector<float> forwardDisplacement;
+    std::vector<float> composedX;
+    std::vector<float> composedY;
+    std::vector<MVToolsVector> backwardVectors;
+    std::vector<MVToolsVector> forwardVectors;
+    std::vector<char> backwardBlob;
+    std::vector<char> forwardBlob;
 };
 
 struct MVAnalysisData final {
@@ -1646,12 +1650,12 @@ static const MVAnalysisData& getMotionVectorAnalysisData(const MotionVectorConfi
     return backward ? config.backwardAnalysisData : config.forwardAnalysisData;
 }
 
-static std::vector<char> packMotionVectorBlob(const std::vector<MVToolsVector>& vectors, const bool valid,
-                                              const MVAnalysisData& analysisData,
-                                              MotionVectorFrameStats* const stats = nullptr) {
+static void packMotionVectorBlob(const std::vector<MVToolsVector>& vectors, const bool valid,
+                                 const MVAnalysisData& analysisData, std::vector<char>& blob,
+                                 MotionVectorFrameStats* const stats = nullptr) {
     const auto planeSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) + vectors.size() * sizeof(MVToolsVector));
     const auto groupSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2 + planeSize);
-    std::vector<char> blob(groupSize);
+    blob.resize(groupSize);
     size_t offset{};
     const auto writeScalar = [&](const auto value) {
         std::memcpy(blob.data() + offset, &value, sizeof(value));
@@ -1664,8 +1668,6 @@ static std::vector<char> packMotionVectorBlob(const std::vector<MVToolsVector>& 
     std::memcpy(blob.data() + offset, vectors.data(), vectors.size() * sizeof(MVToolsVector));
     if (stats)
         *stats = computeMotionVectorFrameStats(vectors, analysisData);
-
-    return blob;
 }
 
 static void buildMaskResizeAxisTable(const int srcSize, const int dstSize,
@@ -1775,16 +1777,16 @@ static void renderMotionVectorSADMask(VSFrame* frame, const VSVideoInfo& vi,
     }
 }
 
-static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* reference, const float* flow,
-                                                const int flowWidth, const int flowHeight,
-                                                const bool valid, const MotionVectorExportContext& ctx,
-                                                const MVAnalysisData& analysisData,
-                                                const VSAPI* vsapi,
-                                                const std::vector<float>* currentLumaCache = nullptr,
-                                                const std::vector<float>* referenceLumaCache = nullptr,
-                                                MotionVectorFrameStats* const stats = nullptr) {
+static void buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* reference, const float* flow,
+                                   const int flowWidth, const int flowHeight,
+                                   const bool valid, const MotionVectorExportContext& ctx,
+                                   const MVAnalysisData& analysisData, std::vector<MVToolsVector>& vectors,
+                                   std::vector<char>& blob, const VSAPI* vsapi,
+                                   const std::vector<float>* currentLumaCache = nullptr,
+                                   const std::vector<float>* referenceLumaCache = nullptr,
+                                   MotionVectorFrameStats* const stats = nullptr) {
     const auto vectorCount = static_cast<size_t>(ctx.blkX) * ctx.blkY;
-    std::vector<MVToolsVector> vectors(vectorCount);
+    vectors.resize(vectorCount);
 
     if (!valid) {
         for (auto& vector : vectors) {
@@ -1793,7 +1795,8 @@ static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VS
             vector.sad = ctx.invalidSad;
         }
 
-        return packMotionVectorBlob(vectors, false, analysisData, stats);
+        packMotionVectorBlob(vectors, false, analysisData, blob, stats);
+        return;
     }
 
     const auto width = vsapi->getFrameWidth(current, 0);
@@ -1846,7 +1849,7 @@ static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VS
         }
     }
 
-    return packMotionVectorBlob(vectors, true, analysisData, stats);
+    packMotionVectorBlob(vectors, true, analysisData, blob, stats);
 }
 
 static MotionVectorExportContext createMotionVectorExportContext(const MotionVectorConfig& config, const bool backward) {
@@ -1877,17 +1880,18 @@ static MotionVectorExportContext createMotionVectorExportContext(const MotionVec
     return ctx;
 }
 
-static std::vector<char> buildMotionVectorBlobFromConfig(const VSFrame* current, const VSFrame* reference, const float* flow,
-                                                         const int flowWidth, const int flowHeight,
-                                                         const bool valid, const MotionVectorConfig& config,
-                                                         const bool backward, const VSAPI* vsapi,
-                                                         const std::vector<float>* currentLumaCache = nullptr,
-                                                         const std::vector<float>* referenceLumaCache = nullptr,
-                                                         MotionVectorFrameStats* const stats = nullptr) {
+static void buildMotionVectorBlobFromConfig(const VSFrame* current, const VSFrame* reference, const float* flow,
+                                            const int flowWidth, const int flowHeight,
+                                            const bool valid, const MotionVectorConfig& config,
+                                            const bool backward, std::vector<MVToolsVector>& vectors,
+                                            std::vector<char>& blob, const VSAPI* vsapi,
+                                            const std::vector<float>* currentLumaCache = nullptr,
+                                            const std::vector<float>* referenceLumaCache = nullptr,
+                                            MotionVectorFrameStats* const stats = nullptr) {
     const auto ctx = createMotionVectorExportContext(config, backward);
-    return buildMVToolsVectorBlob(current, reference, flow, flowWidth, flowHeight, valid, ctx,
-                                  getMotionVectorAnalysisData(config, backward), vsapi,
-                                  currentLumaCache, referenceLumaCache, stats);
+    buildMVToolsVectorBlob(current, reference, flow, flowWidth, flowHeight, valid, ctx,
+                           getMotionVectorAnalysisData(config, backward), vectors, blob, vsapi,
+                           currentLumaCache, referenceLumaCache, stats);
 }
 
 static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFrame* reference, const float* flow,
@@ -1895,14 +1899,16 @@ static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFra
                                              const bool valid, const MotionVectorConfig& config, const VSAPI* vsapi,
                                              const std::vector<float>* currentLumaCache,
                                              const std::vector<float>* referenceLumaCache,
+                                             std::vector<MVToolsVector>& backwardVectors,
+                                             std::vector<MVToolsVector>& forwardVectors,
                                              std::vector<char>& backwardBlob, std::vector<char>& forwardBlob,
                                              MotionVectorFrameStats* const backwardStats = nullptr,
                                              MotionVectorFrameStats* const forwardStats = nullptr) {
     const auto backwardCtx = createMotionVectorExportContext(config, true);
     const auto forwardCtx = createMotionVectorExportContext(config, false);
     const auto vectorCount = static_cast<size_t>(backwardCtx.blkX) * backwardCtx.blkY;
-    std::vector<MVToolsVector> backwardVectors(vectorCount);
-    std::vector<MVToolsVector> forwardVectors(vectorCount);
+    backwardVectors.resize(vectorCount);
+    forwardVectors.resize(vectorCount);
 
     if (!valid) {
         for (size_t i = 0; i < vectorCount; i++) {
@@ -1910,8 +1916,8 @@ static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFra
             forwardVectors[i] = { 0, 0, forwardCtx.invalidSad };
         }
 
-        backwardBlob = packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardStats);
-        forwardBlob = packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardStats);
+        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
+        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
         return;
     }
 
@@ -1959,13 +1965,16 @@ static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFra
         }
     }
 
-    backwardBlob = packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardStats);
-    forwardBlob = packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardStats);
+    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
+    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
 }
 
 static std::vector<char> buildInvalidMotionVectorBlob(const MotionVectorConfig& config, const bool backward,
                                                       MotionVectorFrameStats* const stats = nullptr) {
-    return buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, config, backward, nullptr, nullptr, nullptr, stats);
+    std::vector<MVToolsVector> vectors;
+    std::vector<char> blob;
+    buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, config, backward, vectors, blob, nullptr, nullptr, nullptr, stats);
+    return blob;
 }
 
 static float sampleBilinearPlane(const float* data, const int width, const int height, float x, float y) noexcept {
@@ -2037,17 +2046,18 @@ static void composeDisplacementSequence(const std::vector<const float*>& displac
     }
 }
 
-static std::vector<char> buildMotionVectorBlobFromDisplacement(const VSFrame* current, const VSFrame* reference,
-                                                               const float* displacementX, const float* displacementY,
-                                                               const int displacementWidth, const int displacementHeight,
-                                                               const bool valid, const MotionVectorConfig& config,
-                                                               const bool backward, const VSAPI* vsapi,
-                                                               const std::vector<float>* currentLumaCache = nullptr,
-                                                               const std::vector<float>* referenceLumaCache = nullptr,
-                                                               MotionVectorFrameStats* const stats = nullptr) {
+static void buildMotionVectorBlobFromDisplacement(const VSFrame* current, const VSFrame* reference,
+                                                  const float* displacementX, const float* displacementY,
+                                                  const int displacementWidth, const int displacementHeight,
+                                                  const bool valid, const MotionVectorConfig& config,
+                                                  const bool backward, std::vector<MVToolsVector>& vectors,
+                                                  std::vector<char>& blob, const VSAPI* vsapi,
+                                                  const std::vector<float>* currentLumaCache = nullptr,
+                                                  const std::vector<float>* referenceLumaCache = nullptr,
+                                                  MotionVectorFrameStats* const stats = nullptr) {
     const auto ctx = createMotionVectorExportContext(config, backward);
     const auto vectorCount = static_cast<size_t>(ctx.blkX) * ctx.blkY;
-    std::vector<MVToolsVector> vectors(vectorCount);
+    vectors.resize(vectorCount);
 
     if (!valid) {
         for (auto& vector : vectors) {
@@ -2055,7 +2065,8 @@ static std::vector<char> buildMotionVectorBlobFromDisplacement(const VSFrame* cu
             vector.y = 0;
             vector.sad = ctx.invalidSad;
         }
-        return packMotionVectorBlob(vectors, false, getMotionVectorAnalysisData(config, backward), stats);
+        packMotionVectorBlob(vectors, false, getMotionVectorAnalysisData(config, backward), blob, stats);
+        return;
     }
 
     const auto width = vsapi->getFrameWidth(current, 0);
@@ -2103,7 +2114,7 @@ static std::vector<char> buildMotionVectorBlobFromDisplacement(const VSFrame* cu
         }
     }
 
-    return packMotionVectorBlob(vectors, true, getMotionVectorAnalysisData(config, backward), stats);
+    packMotionVectorBlob(vectors, true, getMotionVectorAnalysisData(config, backward), blob, stats);
 }
 
 static void zeroMotionVectorFrame(VSFrame* frame, const VSVideoInfo& vi, const VSAPI* vsapi);
@@ -2156,16 +2167,18 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
         auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
         zeroMotionVectorFrame(dst, d->vi, vsapi);
         auto props = vsapi->getFramePropertiesRW(dst);
+        auto& scratch = getMotionVectorScratchBuffers();
 
-        std::vector<char> backwardBlob;
-        std::vector<char> forwardBlob;
+        auto& backwardVectors = scratch.backwardVectors;
+        auto& forwardVectors = scratch.forwardVectors;
+        auto& backwardBlob = scratch.backwardBlob;
+        auto& forwardBlob = scratch.forwardBlob;
         MotionVectorFrameStats backwardStats{};
         MotionVectorFrameStats forwardStats{};
         if (reference) {
             const auto width = vsapi->getFrameWidth(current, 0);
             const auto height = vsapi->getFrameHeight(current, 0);
             const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
-            auto& scratch = getMotionVectorScratchBuffers();
             const auto flowSize = static_cast<size_t>(width) * height * 4;
             scratch.flow.resize(flowSize);
             std::shared_ptr<const std::vector<float>> currentLumaPlane;
@@ -2230,12 +2243,13 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
 
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
             buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
-                                             currentLumaCache, referenceLumaCache, backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+                                             currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
+                                             backwardBlob, forwardBlob, &backwardStats, &forwardStats);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
         } else {
-            backwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, true, &backwardStats);
-            forwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, false, &forwardStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, true, backwardVectors, backwardBlob, nullptr, nullptr, nullptr, &backwardStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, false, forwardVectors, forwardBlob, nullptr, nullptr, nullptr, &forwardStats);
         }
 
         vsapi->mapSetData(props, RIFEMVBackwardVectorsInternalKey, backwardBlob.data(), static_cast<int>(backwardBlob.size()), dtBinary, maReplace);
@@ -2329,8 +2343,10 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
         auto props = vsapi->getFramePropertiesRW(dst);
         auto& scratch = getMotionVectorScratchBuffers();
 
-        std::vector<char> backwardBlob;
-        std::vector<char> forwardBlob;
+        auto& backwardVectors = scratch.backwardVectors;
+        auto& forwardVectors = scratch.forwardVectors;
+        auto& backwardBlob = scratch.backwardBlob;
+        auto& forwardBlob = scratch.forwardBlob;
         MotionVectorFrameStats backwardStats{};
         MotionVectorFrameStats forwardStats{};
         auto& backwardDisplacement = scratch.backwardDisplacement;
@@ -2405,7 +2421,8 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
 
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
             buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
-                                             currentLumaCache, referenceLumaCache, backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+                                             currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
+                                             backwardBlob, forwardBlob, &backwardStats, &forwardStats);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
             const auto displacementBuildStartNs = d->perfStats ? monotonicNowNs() : 0;
@@ -2414,8 +2431,8 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             if (d->perfStats)
                 accumulatePerfStat(d->perf->displacementBuildNs, monotonicNowNs() - displacementBuildStartNs);
         } else {
-            backwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, true, &backwardStats);
-            forwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, false, &forwardStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, true, backwardVectors, backwardBlob, nullptr, nullptr, nullptr, &backwardStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, false, forwardVectors, forwardBlob, nullptr, nullptr, nullptr, &forwardStats);
             backwardDisplacement.assign(planeSize * 2, 0.0f);
             forwardDisplacement.assign(planeSize * 2, 0.0f);
         }
@@ -2546,9 +2563,11 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
             accumulatePerfStat(d->perf->composeNs, monotonicNowNs() - composeStartNs);
         const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
         MotionVectorFrameStats stats{};
-        const auto vectorBlob = buildMotionVectorBlobFromDisplacement(current, reference,
-                                                                      scratch.composedX.data(), scratch.composedY.data(), width, height, true,
-                                                                      d->mvConfig, d->backward, vsapi, nullptr, nullptr, &stats);
+        auto& vectors = d->backward ? scratch.backwardVectors : scratch.forwardVectors;
+        auto& vectorBlob = d->backward ? scratch.backwardBlob : scratch.forwardBlob;
+        buildMotionVectorBlobFromDisplacement(current, reference,
+                                              scratch.composedX.data(), scratch.composedY.data(), width, height, true,
+                                              d->mvConfig, d->backward, vectors, vectorBlob, vsapi, nullptr, nullptr, &stats);
         if (d->perfStats)
             accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
 
