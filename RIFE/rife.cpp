@@ -528,17 +528,112 @@ static int unpack_flow_channels(const ncnn::Mat& flow_cpu, ncnn::Mat& flow_cpu_u
     return 0;
 }
 
-static int copy_flow_output_direct(const ncnn::Mat& flow_cpu_unpacked, float* flow_out, const int w, const int h)
+static void copy_scalar_channel_to_flow_output(const unsigned char* const packed, const int scalar_size, const int elempack,
+                                               const int pack_index, const int src_w, float* dst, const int dst_w, const int dst_h) noexcept
 {
-    if (flow_cpu_unpacked.c < 4 || flow_cpu_unpacked.w < w || flow_cpu_unpacked.h < h)
+    if (scalar_size == static_cast<int>(sizeof(float)))
+    {
+        const auto* src = reinterpret_cast<const float*>(packed) + pack_index;
+        for (int y = 0; y < dst_h; y++)
+        {
+            const auto* src_row = src + static_cast<size_t>(y) * src_w * elempack;
+            auto* dst_row = dst + static_cast<size_t>(y) * dst_w;
+            for (int x = 0; x < dst_w; x++)
+                dst_row[x] = src_row[static_cast<size_t>(x) * elempack];
+        }
+        return;
+    }
+
+    const auto* src = reinterpret_cast<const uint16_t*>(packed) + pack_index;
+    for (int y = 0; y < dst_h; y++)
+    {
+        const auto* src_row = src + static_cast<size_t>(y) * src_w * elempack;
+        auto* dst_row = dst + static_cast<size_t>(y) * dst_w;
+        for (int x = 0; x < dst_w; x++)
+            dst_row[x] = convert_fp16_to_float32(src_row[static_cast<size_t>(x) * elempack]);
+    }
+}
+
+static void copy_first_four_packed_scalars_to_flow_output(const unsigned char* const packed, const int scalar_size, const int elempack,
+                                                          const int src_w, float* flow_out, const int dst_w, const int dst_h) noexcept
+{
+    const auto plane_size = static_cast<size_t>(dst_w) * dst_h;
+    auto* dst0 = flow_out;
+    auto* dst1 = flow_out + plane_size;
+    auto* dst2 = flow_out + plane_size * 2;
+    auto* dst3 = flow_out + plane_size * 3;
+
+    if (scalar_size == static_cast<int>(sizeof(float)))
+    {
+        const auto* src = reinterpret_cast<const float*>(packed);
+        for (int y = 0; y < dst_h; y++)
+        {
+            const auto* src_row = src + static_cast<size_t>(y) * src_w * elempack;
+            const auto dst_row = static_cast<size_t>(y) * dst_w;
+            for (int x = 0; x < dst_w; x++)
+            {
+                const auto* src_pixel = src_row + static_cast<size_t>(x) * elempack;
+                const auto dst_index = dst_row + x;
+                dst0[dst_index] = src_pixel[0];
+                dst1[dst_index] = src_pixel[1];
+                dst2[dst_index] = src_pixel[2];
+                dst3[dst_index] = src_pixel[3];
+            }
+        }
+        return;
+    }
+
+    const auto* src = reinterpret_cast<const uint16_t*>(packed);
+    for (int y = 0; y < dst_h; y++)
+    {
+        const auto* src_row = src + static_cast<size_t>(y) * src_w * elempack;
+        const auto dst_row = static_cast<size_t>(y) * dst_w;
+        for (int x = 0; x < dst_w; x++)
+        {
+            const auto* src_pixel = src_row + static_cast<size_t>(x) * elempack;
+            const auto dst_index = dst_row + x;
+            dst0[dst_index] = convert_fp16_to_float32(src_pixel[0]);
+            dst1[dst_index] = convert_fp16_to_float32(src_pixel[1]);
+            dst2[dst_index] = convert_fp16_to_float32(src_pixel[2]);
+            dst3[dst_index] = convert_fp16_to_float32(src_pixel[3]);
+        }
+    }
+}
+
+static int copy_flow_output_direct_from_ncnn(const ncnn::Mat& flow_cpu, float* flow_out, const int w, const int h)
+{
+    const auto scalar_size = flow_cpu.elempack > 0 ? static_cast<int>(flow_cpu.elemsize / flow_cpu.elempack) : 0;
+    if (flow_cpu.elempack < 1 || (scalar_size != static_cast<int>(sizeof(float)) && scalar_size != static_cast<int>(sizeof(uint16_t))))
         return -1;
+    if (flow_cpu.c * flow_cpu.elempack < 4 || flow_cpu.w < w || flow_cpu.h < h)
+        return -1;
+
+    if (flow_cpu.elempack == 1 && scalar_size == static_cast<int>(sizeof(float)))
+    {
+        for (int c = 0; c < 4; c++)
+        {
+            const auto* src = static_cast<const float*>(flow_cpu.channel(c));
+            auto* dst = flow_out + static_cast<size_t>(c) * w * h;
+            for (int y = 0; y < h; y++)
+                std::memcpy(dst + static_cast<size_t>(y) * w, src + static_cast<size_t>(y) * flow_cpu.w, static_cast<size_t>(w) * sizeof(float));
+        }
+        return 0;
+    }
+
+    if (flow_cpu.elempack >= 4)
+    {
+        const auto* packed = static_cast<const unsigned char*>(flow_cpu.channel(0));
+        copy_first_four_packed_scalars_to_flow_output(packed, scalar_size, flow_cpu.elempack, flow_cpu.w, flow_out, w, h);
+        return 0;
+    }
 
     for (int c = 0; c < 4; c++)
     {
-        const auto* src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
+        const auto channel_index = c / flow_cpu.elempack;
+        const auto pack_index = c - channel_index * flow_cpu.elempack;
+        const auto* packed = static_cast<const unsigned char*>(flow_cpu.channel(channel_index));
         auto* dst = flow_out + static_cast<size_t>(c) * w * h;
-        for (int y = 0; y < h; y++)
-            std::memcpy(dst + static_cast<size_t>(y) * w, src + static_cast<size_t>(y) * flow_cpu_unpacked.w, static_cast<size_t>(w) * sizeof(float));
+        copy_scalar_channel_to_flow_output(packed, scalar_size, flow_cpu.elempack, pack_index, flow_cpu.w, dst, w, h);
     }
 
     return 0;
@@ -901,30 +996,33 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
     }
 
-    ncnn::Mat flow_cpu_unpacked;
-    const auto unpack_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    if (unpack_flow_channels(flow_cpu, flow_cpu_unpacked) != 0)
-        return finish(-1);
-    if (collect_perf)
-        perf->unpackNs += monotonic_now_ns() - unpack_start_ns;
-
     int export_status{};
-    if (flow_cpu_unpacked.w >= w && flow_cpu_unpacked.h >= h)
+    if (flow_cpu.w >= w && flow_cpu.h >= h)
     {
         const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        export_status = copy_flow_output_direct(flow_cpu_unpacked, flow_out, w, h);
+        export_status = copy_flow_output_direct_from_ncnn(flow_cpu, flow_out, w, h);
         if (collect_perf)
             perf->exportDirectNs += monotonic_now_ns() - export_start_ns;
     }
-    else if (flow_cpu_unpacked.w * 2 >= w && flow_cpu_unpacked.h * 2 >= h)
-    {
-        const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        export_status = copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
-        if (collect_perf)
-            perf->exportResizeNs += monotonic_now_ns() - export_start_ns;
-    }
     else
-        export_status = -1;
+    {
+        ncnn::Mat flow_cpu_unpacked;
+        const auto unpack_start_ns = collect_perf ? monotonic_now_ns() : 0;
+        if (unpack_flow_channels(flow_cpu, flow_cpu_unpacked) != 0)
+            return finish(-1);
+        if (collect_perf)
+            perf->unpackNs += monotonic_now_ns() - unpack_start_ns;
+
+        if (flow_cpu_unpacked.w * 2 >= w && flow_cpu_unpacked.h * 2 >= h)
+        {
+            const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
+            export_status = copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
+            if (collect_perf)
+                perf->exportResizeNs += monotonic_now_ns() - export_start_ns;
+        }
+        else
+            export_status = -1;
+    }
     if (export_status != 0)
         return finish(-1);
 
