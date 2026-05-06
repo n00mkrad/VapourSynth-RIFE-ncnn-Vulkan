@@ -15,6 +15,7 @@
 
 #include "rife_preproc.comp.hex.h"
 #include "rife_v4_timestep.comp.hex.h"
+#include "rife_mv_reduce.comp.hex.h"
 
 #include "rife_ops.h"
 
@@ -27,6 +28,7 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
 
     rife_preproc = 0;
     rife_v4_timestep = 0;
+    rife_mv_reduce = 0;
     rife_flow_scale_image = 0;
     rife_flow_resize_flow = 0;
     rife_flow_scale_vectors = 0;
@@ -49,6 +51,7 @@ RIFE::~RIFE()
 {
     delete rife_preproc;
     delete rife_v4_timestep;
+    delete rife_mv_reduce;
 
     if (use_flow_scale)
     {
@@ -311,6 +314,21 @@ int RIFE::load(const std::string& modeldir)
             rife_preproc = new ncnn::Pipeline(vkdev);
             rife_preproc->set_optimal_local_size_xyz(8, 8, 3);
             rife_preproc->create(spirv.data(), spirv.size() * 4, specializations);
+        }
+
+        {
+            std::vector<uint32_t> spirv;
+            static ncnn::Mutex lock;
+            {
+                ncnn::MutexLockGuard guard(lock);
+                if (spirv.empty())
+                    compile_spirv_module(rife_mv_reduce_comp_data, static_cast<int>(sizeof(rife_mv_reduce_comp_data) - 1), opt, spirv);
+            }
+
+            rife_mv_reduce = new ncnn::Pipeline(vkdev);
+            rife_mv_reduce->set_optimal_local_size_xyz(64, 1, 1);
+            std::vector<ncnn::vk_specialization_type> reduceSpecializations;
+            rife_mv_reduce->create(spirv.data(), spirv.size() * 4, reduceSpecializations);
         }
 
     }
@@ -697,6 +715,17 @@ static int copy_flow_output_resized_cpu(const ncnn::Mat& flow_cpu_unpacked, floa
     return 0;
 }
 
+static int copy_reduced_flow_output_direct_from_ncnn(const ncnn::Mat& reduced_flow_cpu, RIFEReducedFlowBlock* reduced_flow_out,
+                                                     const int block_count)
+{
+    if (reduced_flow_cpu.dims != 1 || reduced_flow_cpu.w < block_count ||
+        reduced_flow_cpu.elempack != 4 || reduced_flow_cpu.elemsize != sizeof(RIFEReducedFlowBlock))
+        return -1;
+
+    std::memcpy(reduced_flow_out, reduced_flow_cpu.data, static_cast<size_t>(block_count) * sizeof(RIFEReducedFlowBlock));
+    return 0;
+}
+
 static bool extract_v4_flow_blob(ncnn::Extractor& ex, ncnn::VkCompute& cmd, ncnn::VkMat& flow,
                                  const std::string& preferred_flow_blob_name)
 {
@@ -765,10 +794,11 @@ static void scale_plane_to_ncnn_input(const float* src, const ptrdiff_t src_stri
     }
 }
 
-int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0B,
-                       const float* src1R, const float* src1G, const float* src1B,
-                       float* flow_out, const int w, const int h, const ptrdiff_t stride,
-                       FlowPerfBreakdown* perf) const
+int RIFE::process_flow_internal(const float* src0R, const float* src0G, const float* src0B,
+                                const float* src1R, const float* src1G, const float* src1B,
+                                float* flow_out, RIFEReducedFlowBlock* reduced_flow_out, const RIFEFlowReduceConfig* reduce_config,
+                                const int w, const int h, const ptrdiff_t stride,
+                                FlowPerfBreakdown* perf) const
 {
     const bool collect_perf = perf != nullptr;
     if (collect_perf)
@@ -973,6 +1003,45 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     if (!used_gpu_resize && require_gpu_resize)
         return finish(-1);
 
+    const auto reduced_output = reduce_config != nullptr;
+    if (reduced_output)
+    {
+        if (!rife_mv_reduce || !reduced_flow_out || reduce_config->blockCountX <= 0 || reduce_config->blockCountY <= 0)
+            return finish(-1);
+        if (flow_readback_source.w < w || flow_readback_source.h < h || flow_readback_source.elempack != 4)
+            return finish(-1);
+
+        const auto reduce_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
+        const auto block_count = reduce_config->blockCountX * reduce_config->blockCountY;
+        ncnn::VkMat reduced_flow_gpu;
+        reduced_flow_gpu.create(block_count, sizeof(RIFEReducedFlowBlock), 4, blob_vkallocator);
+        if (reduced_flow_gpu.empty())
+            return finish(-1);
+
+        std::vector<ncnn::VkMat> bindings(2);
+        bindings[0] = flow_readback_source;
+        bindings[1] = reduced_flow_gpu;
+
+        std::vector<ncnn::vk_constant_type> constants(12);
+        constants[0].i = flow_readback_source.w;
+        constants[1].i = w;
+        constants[2].i = h;
+        constants[3].i = reduce_config->blockCountX;
+        constants[4].i = reduce_config->blockCountY;
+        constants[5].i = reduce_config->internalBlockSizeX;
+        constants[6].i = reduce_config->internalBlockSizeY;
+        constants[7].i = reduce_config->internalStepX;
+        constants[8].i = reduce_config->internalStepY;
+        constants[9].i = reduce_config->internalHPadding;
+        constants[10].i = reduce_config->internalVPadding;
+        constants[11].i = reduce_config->blockReduce;
+
+        cmd.record_pipeline(rife_mv_reduce, bindings, constants, reduced_flow_gpu);
+        flow_readback_source = reduced_flow_gpu;
+        if (collect_perf)
+            perf->flowReduceRecordNs += monotonic_now_ns() - reduce_record_start_ns;
+    }
+
     ncnn::Option opt_staging = opt;
     opt_staging.blob_vkallocator = staging_vkallocator;
     const auto readback_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
@@ -1013,7 +1082,14 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         perf->readbackMapNs += monotonic_now_ns() - readback_map_start_ns;
 
     int export_status{};
-    if (flow_cpu.w >= w && flow_cpu.h >= h)
+    if (reduced_output)
+    {
+        const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
+        export_status = copy_reduced_flow_output_direct_from_ncnn(flow_cpu, reduced_flow_out, reduce_config->blockCountX * reduce_config->blockCountY);
+        if (collect_perf)
+            perf->exportDirectNs += monotonic_now_ns() - export_start_ns;
+    }
+    else if (flow_cpu.w >= w && flow_cpu.h >= h)
     {
         const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
         export_status = copy_flow_output_direct_from_ncnn(flow_cpu, flow_out, w, h);
@@ -1043,4 +1119,21 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         return finish(-1);
 
     return finish(0);
+}
+
+int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0B,
+                       const float* src1R, const float* src1G, const float* src1B,
+                       float* flow_out, const int w, const int h, const ptrdiff_t stride,
+                       FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, flow_out, nullptr, nullptr, w, h, stride, perf);
+}
+
+int RIFE::process_flow_reduced(const float* src0R, const float* src0G, const float* src0B,
+                               const float* src1R, const float* src1G, const float* src1B,
+                               RIFEReducedFlowBlock* reduced_flow_out, const RIFEFlowReduceConfig& reduce_config,
+                               const int w, const int h, const ptrdiff_t stride,
+                               FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, nullptr, reduced_flow_out, &reduce_config, w, h, stride, perf);
 }

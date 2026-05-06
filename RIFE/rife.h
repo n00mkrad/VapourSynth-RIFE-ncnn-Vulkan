@@ -24,6 +24,7 @@ struct FlowPerfBreakdown final {
     int64_t preprocRecordNs{};
     int64_t inferenceRecordNs{};
     int64_t outputRecordNs{};
+    int64_t flowReduceRecordNs{};
     int64_t readbackRecordNs{};
     int64_t submitWaitNs{};
     int64_t readbackInvalidateNs{};
@@ -33,6 +34,25 @@ struct FlowPerfBreakdown final {
     int64_t exportResizeNs{};
     int64_t cleanupNs{};
     int64_t readbackBytes{};
+};
+
+struct RIFEFlowReduceConfig final {
+    int blockCountX;
+    int blockCountY;
+    int internalBlockSizeX;
+    int internalBlockSizeY;
+    int internalStepX;
+    int internalStepY;
+    int internalHPadding;
+    int internalVPadding;
+    int blockReduce;
+};
+
+struct RIFEReducedFlowBlock final {
+    float backwardX;
+    float backwardY;
+    float forwardX;
+    float forwardY;
 };
 
 class RIFE
@@ -52,12 +72,24 @@ public:
                      const float* src1R, const float* src1G, const float* src1B,
                      float* flow, const int w, const int h, const ptrdiff_t stride,
                      FlowPerfBreakdown* perf = nullptr) const;
+    int process_flow_reduced(const float* src0R, const float* src0G, const float* src0B,
+                             const float* src1R, const float* src1G, const float* src1B,
+                             RIFEReducedFlowBlock* reducedFlow, const RIFEFlowReduceConfig& reduceConfig,
+                             const int w, const int h, const ptrdiff_t stride,
+                             FlowPerfBreakdown* perf = nullptr) const;
 
 private:
+    int process_flow_internal(const float* src0R, const float* src0G, const float* src0B,
+                              const float* src1R, const float* src1G, const float* src1B,
+                              float* flow, RIFEReducedFlowBlock* reducedFlow, const RIFEFlowReduceConfig* reduceConfig,
+                              const int w, const int h, const ptrdiff_t stride,
+                              FlowPerfBreakdown* perf = nullptr) const;
+
     ncnn::VulkanDevice* vkdev;
     ncnn::Net flownet;
     ncnn::Pipeline* rife_preproc;
     ncnn::Pipeline* rife_v4_timestep;
+    ncnn::Pipeline* rife_mv_reduce;
     ncnn::Layer* rife_flow_scale_image;
     ncnn::Layer* rife_flow_resize_flow;
     ncnn::Layer* rife_flow_scale_vectors;

@@ -48,6 +48,7 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> flowPreprocRecordNs{ 0 };
     std::atomic<int64_t> flowInferenceRecordNs{ 0 };
     std::atomic<int64_t> flowOutputRecordNs{ 0 };
+    std::atomic<int64_t> flowReduceRecordNs{ 0 };
     std::atomic<int64_t> flowReadbackRecordNs{ 0 };
     std::atomic<int64_t> flowSubmitWaitNs{ 0 };
     std::atomic<int64_t> flowReadbackInvalidateNs{ 0 };
@@ -191,6 +192,7 @@ struct MotionVectorScratchBuffers final {
     std::vector<float> forwardDisplacement;
     std::vector<float> composedX;
     std::vector<float> composedY;
+    std::vector<RIFEReducedFlowBlock> reducedFlow;
     std::vector<MVToolsVector> backwardVectors;
     std::vector<MVToolsVector> forwardVectors;
     std::vector<char> backwardBlob;
@@ -250,6 +252,11 @@ struct BilinearAxisEntry final {
 enum class MotionVectorSADMaskMode : uint8_t {
     Relative,
     Absolute,
+};
+
+enum class MotionVectorExportBackend : uint8_t {
+    Cpu,
+    GpuFlowReduce,
 };
 
 struct MotionVectorFrameStatsKeys final {
@@ -388,6 +395,7 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto flowPreprocRecordNs = stats.flowPreprocRecordNs.load(std::memory_order_relaxed);
     const auto flowInferenceRecordNs = stats.flowInferenceRecordNs.load(std::memory_order_relaxed);
     const auto flowOutputRecordNs = stats.flowOutputRecordNs.load(std::memory_order_relaxed);
+    const auto flowReduceRecordNs = stats.flowReduceRecordNs.load(std::memory_order_relaxed);
     const auto flowReadbackRecordNs = stats.flowReadbackRecordNs.load(std::memory_order_relaxed);
     const auto flowSubmitWaitNs = stats.flowSubmitWaitNs.load(std::memory_order_relaxed);
     const auto flowReadbackInvalidateNs = stats.flowReadbackInvalidateNs.load(std::memory_order_relaxed);
@@ -433,6 +441,7 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
               << " flow_preproc_record_ms=" << nsToMs(flowPreprocRecordNs)
               << " flow_inference_record_ms=" << nsToMs(flowInferenceRecordNs)
               << " flow_output_record_ms=" << nsToMs(flowOutputRecordNs)
+              << " flow_reduce_record_ms=" << nsToMs(flowReduceRecordNs)
               << " flow_readback_record_ms=" << nsToMs(flowReadbackRecordNs) << '\n';
     std::cerr << "  flow_readback_mib=" << bytesToMiB(flowReadbackBytes)
               << " flow_readback_avg_mib=" << (flowCalls > 0 ? bytesToMiB(flowReadbackBytes) / flowCalls : 0.0)
@@ -441,6 +450,7 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     std::cerr << "  flow_setup_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSetupNs) / flowCalls : 0.0)
               << " flow_cpu_prep_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCpuPrepNs) / flowCalls : 0.0)
               << " flow_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCommandRecordNs) / flowCalls : 0.0)
+              << " flow_reduce_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowReduceRecordNs) / flowCalls : 0.0)
               << " flow_readback_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowReadbackRecordNs) / flowCalls : 0.0)
               << " flow_submit_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSubmitWaitNs) / flowCalls : 0.0)
               << " flow_readback_invalidate_avg_ms=" << (flowCalls > 0 ? nsToMs(flowReadbackInvalidateNs) / flowCalls : 0.0)
@@ -475,9 +485,30 @@ static const char* flowResizeModeName(const FlowResizeMode mode) noexcept {
     }
 }
 
+static const char* motionVectorExportBackendName(const MotionVectorExportBackend backend) noexcept {
+    switch (backend) {
+    case MotionVectorExportBackend::Cpu:
+        return "cpu";
+    case MotionVectorExportBackend::GpuFlowReduce:
+        return "gpu_flow_reduce";
+    default:
+        return "unknown";
+    }
+}
+
+static MotionVectorExportBackend parseMotionVectorExportBackend(const char* const value) {
+    if (!value || std::strcmp(value, "cpu") == 0)
+        return MotionVectorExportBackend::Cpu;
+    if (std::strcmp(value, "gpu_flow_reduce") == 0)
+        return MotionVectorExportBackend::GpuFlowReduce;
+
+    throw "mv_export_backend must be cpu or gpu_flow_reduce";
+}
+
 static void printMotionVectorInvocation(const char* const functionName, const int gpuId, const int gpuThread,
                                         const int sharedFlowInFlight, const bool sharedLumaCache, const float flowScale,
-                                        const FlowResizeMode flowResizeMode, const bool perfStats,
+                                        const FlowResizeMode flowResizeMode, const MotionVectorExportBackend mvExportBackend,
+                                        const bool perfStats,
                                         const MotionVectorConfig& config, const float resScale,
                                         const int inferenceWidth, const int inferenceHeight,
                                         const int absSadClipRange, const bool renderSadMask,
@@ -492,6 +523,7 @@ static void printMotionVectorInvocation(const char* const functionName, const in
             << " flow_scale=" << flowScale
             << " res_scale=" << resScale
             << " cpu_flow_resize=" << flowResizeModeName(flowResizeMode)
+            << " mv_export_backend=" << motionVectorExportBackendName(mvExportBackend)
             << " perf_stats=" << perfStats
             << " blksize_x=" << config.blockSizeX
             << " blksize_y=" << config.blockSizeY
@@ -843,6 +875,57 @@ static int processFlowWithSemaphores(const RIFE* const rife,
 
     const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
     const auto status = rife->process_flow(src0R, src0G, src0B, src1R, src1G, src1B, flowOut, width, height, stride, flowPerf);
+    if (rifeProcessWallNs)
+        *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
+
+    if (sharedSemaphore)
+        sharedSemaphore->release();
+    localSemaphore->release();
+    return status;
+}
+
+static int processReducedFlowWithSemaphores(const RIFE* const rife,
+                                            std::counting_semaphore<>* const localSemaphore,
+                                            std::counting_semaphore<>* const sharedSemaphore,
+                                            const float* src0R, const float* src0G, const float* src0B,
+                                            const float* src1R, const float* src1G, const float* src1B,
+                                            RIFEReducedFlowBlock* reducedFlowOut, const RIFEFlowReduceConfig& reduceConfig,
+                                            const int width, const int height, const ptrdiff_t stride,
+                                            int64_t* waitNs = nullptr,
+                                            int64_t* localWaitNs = nullptr,
+                                            int64_t* sharedWaitNs = nullptr,
+                                            int64_t* rifeProcessWallNs = nullptr,
+                                            FlowPerfBreakdown* flowPerf = nullptr) noexcept {
+    int64_t localWait{};
+    int64_t sharedWait{};
+    if (localWaitNs || waitNs) {
+        const auto localWaitStartNs = monotonicNowNs();
+        localSemaphore->acquire();
+        localWait = monotonicNowNs() - localWaitStartNs;
+    } else {
+        localSemaphore->acquire();
+    }
+
+    if (sharedSemaphore) {
+        if (sharedWaitNs || waitNs) {
+            const auto sharedWaitStartNs = monotonicNowNs();
+            sharedSemaphore->acquire();
+            sharedWait = monotonicNowNs() - sharedWaitStartNs;
+        } else {
+            sharedSemaphore->acquire();
+        }
+    }
+
+    if (localWaitNs)
+        *localWaitNs = localWait;
+    if (sharedWaitNs)
+        *sharedWaitNs = sharedWait;
+    if (waitNs)
+        *waitNs = localWait + sharedWait;
+
+    const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
+    const auto status = rife->process_flow_reduced(src0R, src0G, src0B, src1R, src1G, src1B,
+                                                   reducedFlowOut, reduceConfig, width, height, stride, flowPerf);
     if (rifeProcessWallNs)
         *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
 
@@ -1366,6 +1449,7 @@ struct RIFEMVPairData final {
     std::unique_ptr<std::counting_semaphore<>> semaphore;
     std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
     std::shared_ptr<MotionVectorLumaCache> lumaCache;
+    MotionVectorExportBackend mvExportBackend{ MotionVectorExportBackend::Cpu };
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -1912,6 +1996,20 @@ static MotionVectorExportContext createMotionVectorExportContext(const MotionVec
     return ctx;
 }
 
+static RIFEFlowReduceConfig createRIFEFlowReduceConfig(const MotionVectorConfig& config) noexcept {
+    RIFEFlowReduceConfig reduceConfig{};
+    reduceConfig.blockCountX = config.blkX;
+    reduceConfig.blockCountY = config.blkY;
+    reduceConfig.internalBlockSizeX = config.internalBlockSizeX;
+    reduceConfig.internalBlockSizeY = config.internalBlockSizeY;
+    reduceConfig.internalStepX = config.internalStepX;
+    reduceConfig.internalStepY = config.internalStepY;
+    reduceConfig.internalHPadding = config.internalHPadding;
+    reduceConfig.internalVPadding = config.internalVPadding;
+    reduceConfig.blockReduce = config.blockReduce;
+    return reduceConfig;
+}
+
 static void buildMotionVectorBlobFromConfig(const VSFrame* current, const VSFrame* reference, const float* flow,
                                             const int flowWidth, const int flowHeight,
                                             const bool valid, const MotionVectorConfig& config,
@@ -1989,6 +2087,70 @@ static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFra
             const auto forwardFlowY = reduceBlockFlow(forwardFlowYPlane, flowWidth, flowHeight, internalBlockX, internalBlockY, forwardCtx);
             forwardVector.x = static_cast<int>(std::lround(-2.0f * forwardFlowX * forwardCtx.motionScaleX * forwardCtx.pel));
             forwardVector.y = static_cast<int>(std::lround(-2.0f * forwardFlowY * forwardCtx.motionScaleY * forwardCtx.pel));
+            forwardVector.x = clampMotionVectorComponent(forwardVector.x, forwardCtx.pel, blockX, forwardCtx.blockSizeX, width, forwardCtx.hPadding);
+            forwardVector.y = clampMotionVectorComponent(forwardVector.y, forwardCtx.pel, blockY, forwardCtx.blockSizeY, height, forwardCtx.vPadding);
+            const auto forwardPixelDx = static_cast<int>(std::lround(static_cast<double>(forwardVector.x) / forwardCtx.pel));
+            const auto forwardPixelDy = static_cast<int>(std::lround(static_cast<double>(forwardVector.y) / forwardCtx.pel));
+            forwardVector.sad = computeBlockSAD(forwardSadContext, forwardPixelDx, forwardPixelDy, blockX, blockY);
+        }
+    }
+
+    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
+    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+}
+
+static void buildMotionVectorBlobsFromReducedFlow(const VSFrame* current, const VSFrame* reference, const RIFEReducedFlowBlock* reducedFlow,
+                                                  const bool valid, const MotionVectorConfig& config, const VSAPI* vsapi,
+                                                  const std::vector<float>* currentLumaCache,
+                                                  const std::vector<float>* referenceLumaCache,
+                                                  std::vector<MVToolsVector>& backwardVectors,
+                                                  std::vector<MVToolsVector>& forwardVectors,
+                                                  std::vector<char>& backwardBlob, std::vector<char>& forwardBlob,
+                                                  MotionVectorFrameStats* const backwardStats = nullptr,
+                                                  MotionVectorFrameStats* const forwardStats = nullptr) {
+    const auto backwardCtx = createMotionVectorExportContext(config, true);
+    const auto forwardCtx = createMotionVectorExportContext(config, false);
+    const auto vectorCount = static_cast<size_t>(backwardCtx.blkX) * backwardCtx.blkY;
+    backwardVectors.resize(vectorCount);
+    forwardVectors.resize(vectorCount);
+
+    if (!valid) {
+        for (size_t i = 0; i < vectorCount; i++) {
+            backwardVectors[i] = { 0, 0, backwardCtx.invalidSad };
+            forwardVectors[i] = { 0, 0, forwardCtx.invalidSad };
+        }
+
+        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
+        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+        return;
+    }
+
+    const auto width = vsapi->getFrameWidth(current, 0);
+    const auto height = vsapi->getFrameHeight(current, 0);
+    const auto currentLumaPtr = currentLumaCache ? currentLumaCache->data() : nullptr;
+    const auto referenceLumaPtr = referenceLumaCache ? referenceLumaCache->data() : nullptr;
+    const auto backwardSadContext = makeSADContext(current, reference, backwardCtx, vsapi, currentLumaPtr, referenceLumaPtr);
+    const auto forwardSadContext = makeSADContext(reference, current, forwardCtx, vsapi, referenceLumaPtr, currentLumaPtr);
+
+    for (auto by = 0; by < backwardCtx.blkY; by++) {
+        const auto blockY = by * backwardCtx.stepY - backwardCtx.vPadding;
+        for (auto bx = 0; bx < backwardCtx.blkX; bx++) {
+            const auto blockX = bx * backwardCtx.stepX - backwardCtx.hPadding;
+            const auto vectorIndex = static_cast<size_t>(by) * backwardCtx.blkX + bx;
+            const auto& reduced = reducedFlow[vectorIndex];
+            auto& backwardVector = backwardVectors[vectorIndex];
+            auto& forwardVector = forwardVectors[vectorIndex];
+
+            backwardVector.x = static_cast<int>(std::lround(-2.0f * reduced.backwardX * backwardCtx.motionScaleX * backwardCtx.pel));
+            backwardVector.y = static_cast<int>(std::lround(-2.0f * reduced.backwardY * backwardCtx.motionScaleY * backwardCtx.pel));
+            backwardVector.x = clampMotionVectorComponent(backwardVector.x, backwardCtx.pel, blockX, backwardCtx.blockSizeX, width, backwardCtx.hPadding);
+            backwardVector.y = clampMotionVectorComponent(backwardVector.y, backwardCtx.pel, blockY, backwardCtx.blockSizeY, height, backwardCtx.vPadding);
+            const auto backwardPixelDx = static_cast<int>(std::lround(static_cast<double>(backwardVector.x) / backwardCtx.pel));
+            const auto backwardPixelDy = static_cast<int>(std::lround(static_cast<double>(backwardVector.y) / backwardCtx.pel));
+            backwardVector.sad = computeBlockSAD(backwardSadContext, backwardPixelDx, backwardPixelDy, blockX, blockY);
+
+            forwardVector.x = static_cast<int>(std::lround(-2.0f * reduced.forwardX * forwardCtx.motionScaleX * forwardCtx.pel));
+            forwardVector.y = static_cast<int>(std::lround(-2.0f * reduced.forwardY * forwardCtx.motionScaleY * forwardCtx.pel));
             forwardVector.x = clampMotionVectorComponent(forwardVector.x, forwardCtx.pel, blockX, forwardCtx.blockSizeX, width, forwardCtx.hPadding);
             forwardVector.y = clampMotionVectorComponent(forwardVector.y, forwardCtx.pel, blockY, forwardCtx.blockSizeY, height, forwardCtx.vPadding);
             const auto forwardPixelDx = static_cast<int>(std::lround(static_cast<double>(forwardVector.x) / forwardCtx.pel));
@@ -2211,8 +2373,15 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             const auto width = vsapi->getFrameWidth(current, 0);
             const auto height = vsapi->getFrameHeight(current, 0);
             const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
-            const auto flowSize = static_cast<size_t>(width) * height * 4;
-            scratch.flow.resize(flowSize);
+            const auto useGpuFlowReduce = d->mvExportBackend == MotionVectorExportBackend::GpuFlowReduce;
+            RIFEFlowReduceConfig reduceConfig{};
+            if (useGpuFlowReduce) {
+                reduceConfig = createRIFEFlowReduceConfig(d->mvConfig);
+                scratch.reducedFlow.resize(static_cast<size_t>(reduceConfig.blockCountX) * reduceConfig.blockCountY);
+            } else {
+                const auto flowSize = static_cast<size_t>(width) * height * 4;
+                scratch.flow.resize(flowSize);
+            }
             std::shared_ptr<const std::vector<float>> currentLumaPlane;
             std::shared_ptr<const std::vector<float>> referenceLumaPlane;
             const std::vector<float>* currentLumaCache = nullptr;
@@ -2230,14 +2399,23 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             int64_t rifeProcessWallNs{};
             FlowPerfBreakdown flowPerf{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
-            const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
-                                                          currentR, currentG, currentB, referenceR, referenceG, referenceB,
-                                                          scratch.flow.data(), width, height, stride,
-                                                          d->perfStats ? &semaphoreWaitNs : nullptr,
-                                                          d->perfStats ? &localSemaphoreWaitNs : nullptr,
-                                                          d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
-                                                          d->perfStats ? &rifeProcessWallNs : nullptr,
-                                                          d->perfStats ? &flowPerf : nullptr);
+            const auto status = useGpuFlowReduce ?
+                processReducedFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
+                                                 currentR, currentG, currentB, referenceR, referenceG, referenceB,
+                                                 scratch.reducedFlow.data(), reduceConfig, width, height, stride,
+                                                 d->perfStats ? &semaphoreWaitNs : nullptr,
+                                                 d->perfStats ? &localSemaphoreWaitNs : nullptr,
+                                                 d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
+                                                 d->perfStats ? &rifeProcessWallNs : nullptr,
+                                                 d->perfStats ? &flowPerf : nullptr) :
+                processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
+                                          currentR, currentG, currentB, referenceR, referenceG, referenceB,
+                                          scratch.flow.data(), width, height, stride,
+                                          d->perfStats ? &semaphoreWaitNs : nullptr,
+                                          d->perfStats ? &localSemaphoreWaitNs : nullptr,
+                                          d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
+                                          d->perfStats ? &rifeProcessWallNs : nullptr,
+                                          d->perfStats ? &flowPerf : nullptr);
             if (d->perfStats) {
                 accumulatePerfStat(d->perf->semaphoreWaitNs, semaphoreWaitNs);
                 accumulatePerfStat(d->perf->localSemaphoreWaitNs, localSemaphoreWaitNs);
@@ -2252,6 +2430,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                 accumulatePerfStat(d->perf->flowPreprocRecordNs, flowPerf.preprocRecordNs);
                 accumulatePerfStat(d->perf->flowInferenceRecordNs, flowPerf.inferenceRecordNs);
                 accumulatePerfStat(d->perf->flowOutputRecordNs, flowPerf.outputRecordNs);
+                accumulatePerfStat(d->perf->flowReduceRecordNs, flowPerf.flowReduceRecordNs);
                 accumulatePerfStat(d->perf->flowReadbackRecordNs, flowPerf.readbackRecordNs);
                 accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
                 accumulatePerfStat(d->perf->flowReadbackInvalidateNs, flowPerf.readbackInvalidateNs);
@@ -2287,9 +2466,15 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             }
 
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
-            buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
-                                             currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
-                                             backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+            if (useGpuFlowReduce) {
+                buildMotionVectorBlobsFromReducedFlow(currentSource, referenceSource, scratch.reducedFlow.data(), true, d->mvConfig, vsapi,
+                                                      currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
+                                                      backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+            } else {
+                buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
+                                                 currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
+                                                 backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+            }
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
         } else {
@@ -2443,6 +2628,7 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
                 accumulatePerfStat(d->perf->flowPreprocRecordNs, flowPerf.preprocRecordNs);
                 accumulatePerfStat(d->perf->flowInferenceRecordNs, flowPerf.inferenceRecordNs);
                 accumulatePerfStat(d->perf->flowOutputRecordNs, flowPerf.outputRecordNs);
+                accumulatePerfStat(d->perf->flowReduceRecordNs, flowPerf.flowReduceRecordNs);
                 accumulatePerfStat(d->perf->flowReadbackRecordNs, flowPerf.readbackRecordNs);
                 accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
                 accumulatePerfStat(d->perf->flowReadbackInvalidateNs, flowPerf.readbackInvalidateNs);
@@ -2730,6 +2916,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto cpuFlowResize{ vsapi->mapGetIntSaturated(in, "cpu_flow_resize", 0, &err) };
         if (!err)
             flowResizeMode = cpuFlowResize ? FlowResizeMode::ForceCPU : FlowResizeMode::ForceGPU;
+        const auto mvExportBackendValue = vsapi->mapGetData(in, "mv_export_backend", 0, &err);
+        pairData->mvExportBackend = parseMotionVectorExportBackend(err ? "cpu" : mvExportBackendValue);
         const auto matrixInValue = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
         const auto* matrixIn = err ? "709" : matrixInValue;
         const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
@@ -2864,7 +3052,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
                                                       mvOverlapX, mvOverlapY, mvPel, mvDelta,
                                   mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
-                                    perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
+                                    pairData->mvExportBackend, perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, true);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
@@ -3174,7 +3362,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
                                                             mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         }
         printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
-                                    perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
+                                    MotionVectorExportBackend::Cpu, perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, false);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
@@ -3335,6 +3523,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
+                             "mv_export_backend:data:opt;"
                              "perf_stats:int:opt;"
                              "blksize_x:int:opt;"
                              "blksize_y:int:opt;"
