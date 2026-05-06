@@ -17,12 +17,18 @@ enum class FlowResizeMode {
 };
 
 struct FlowPerfBreakdown final {
+    int64_t setupNs{};
     int64_t cpuPrepNs{};
     int64_t commandRecordNs{};
+    int64_t uploadRecordNs{};
+    int64_t preprocRecordNs{};
+    int64_t inferenceRecordNs{};
+    int64_t outputRecordNs{};
     int64_t submitWaitNs{};
     int64_t unpackNs{};
     int64_t exportDirectNs{};
     int64_t exportResizeNs{};
+    int64_t cleanupNs{};
 };
 
 class RIFE

@@ -61,12 +61,19 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> localSemaphoreWaitNs{ 0 };
     std::atomic<int64_t> sharedSemaphoreWaitNs{ 0 };
     std::atomic<int64_t> processFlowNs{ 0 };
+    std::atomic<int64_t> rifeProcessWallNs{ 0 };
+    std::atomic<int64_t> flowSetupNs{ 0 };
     std::atomic<int64_t> flowCpuPrepNs{ 0 };
     std::atomic<int64_t> flowCommandRecordNs{ 0 };
+    std::atomic<int64_t> flowUploadRecordNs{ 0 };
+    std::atomic<int64_t> flowPreprocRecordNs{ 0 };
+    std::atomic<int64_t> flowInferenceRecordNs{ 0 };
+    std::atomic<int64_t> flowOutputRecordNs{ 0 };
     std::atomic<int64_t> flowSubmitWaitNs{ 0 };
     std::atomic<int64_t> flowUnpackNs{ 0 };
     std::atomic<int64_t> flowExportDirectNs{ 0 };
     std::atomic<int64_t> flowExportResizeNs{ 0 };
+    std::atomic<int64_t> flowCleanupNs{ 0 };
     std::atomic<int64_t> lumaBuildNs{ 0 };
     std::atomic<int64_t> vectorPackNs{ 0 };
     std::atomic<int64_t> renderSadMaskNs{ 0 };
@@ -386,17 +393,27 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto localSemaphoreWaitNs = stats.localSemaphoreWaitNs.load(std::memory_order_relaxed);
     const auto sharedSemaphoreWaitNs = stats.sharedSemaphoreWaitNs.load(std::memory_order_relaxed);
     const auto processFlowNs = stats.processFlowNs.load(std::memory_order_relaxed);
+    const auto rifeProcessWallNs = stats.rifeProcessWallNs.load(std::memory_order_relaxed);
+    const auto flowSetupNs = stats.flowSetupNs.load(std::memory_order_relaxed);
     const auto flowCpuPrepNs = stats.flowCpuPrepNs.load(std::memory_order_relaxed);
     const auto flowCommandRecordNs = stats.flowCommandRecordNs.load(std::memory_order_relaxed);
+    const auto flowUploadRecordNs = stats.flowUploadRecordNs.load(std::memory_order_relaxed);
+    const auto flowPreprocRecordNs = stats.flowPreprocRecordNs.load(std::memory_order_relaxed);
+    const auto flowInferenceRecordNs = stats.flowInferenceRecordNs.load(std::memory_order_relaxed);
+    const auto flowOutputRecordNs = stats.flowOutputRecordNs.load(std::memory_order_relaxed);
     const auto flowSubmitWaitNs = stats.flowSubmitWaitNs.load(std::memory_order_relaxed);
     const auto flowUnpackNs = stats.flowUnpackNs.load(std::memory_order_relaxed);
     const auto flowExportDirectNs = stats.flowExportDirectNs.load(std::memory_order_relaxed);
     const auto flowExportResizeNs = stats.flowExportResizeNs.load(std::memory_order_relaxed);
+    const auto flowCleanupNs = stats.flowCleanupNs.load(std::memory_order_relaxed);
     const auto lumaBuildNs = stats.lumaBuildNs.load(std::memory_order_relaxed);
     const auto vectorPackNs = stats.vectorPackNs.load(std::memory_order_relaxed);
     const auto renderSadMaskNs = stats.renderSadMaskNs.load(std::memory_order_relaxed);
     const auto displacementBuildNs = stats.displacementBuildNs.load(std::memory_order_relaxed);
     const auto composeNs = stats.composeNs.load(std::memory_order_relaxed);
+    const auto rifeProcessAccountedNs = flowSetupNs + flowCpuPrepNs + flowCommandRecordNs + flowSubmitWaitNs +
+                                        flowUnpackNs + flowExportDirectNs + flowExportResizeNs + flowCleanupNs;
+    const auto rifeProcessUnaccountedNs = rifeProcessWallNs - rifeProcessAccountedNs;
 
     std::cerr << std::fixed << std::setprecision(3);
     std::cerr << "[rmv] perf_stats summary (" << label << ")\n";
@@ -408,19 +425,30 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
               << " output_avg_ms=" << (outputFrames > 0 ? nsToMs(outputTotalNs) / outputFrames : 0.0) << '\n';
     std::cerr << "  flow_calls=" << flowCalls
               << " process_flow_ms=" << nsToMs(processFlowNs)
-              << " process_flow_avg_ms=" << (flowCalls > 0 ? nsToMs(processFlowNs) / flowCalls : 0.0) << '\n';
-    std::cerr << "  flow_cpu_prep_ms=" << nsToMs(flowCpuPrepNs)
+              << " process_flow_avg_ms=" << (flowCalls > 0 ? nsToMs(processFlowNs) / flowCalls : 0.0)
+              << " rife_process_wall_ms=" << nsToMs(rifeProcessWallNs)
+              << " rife_process_wall_avg_ms=" << (flowCalls > 0 ? nsToMs(rifeProcessWallNs) / flowCalls : 0.0)
+              << " rife_process_unaccounted_ms=" << nsToMs(rifeProcessUnaccountedNs) << '\n';
+    std::cerr << "  flow_setup_ms=" << nsToMs(flowSetupNs)
+              << " flow_cpu_prep_ms=" << nsToMs(flowCpuPrepNs)
               << " flow_record_ms=" << nsToMs(flowCommandRecordNs)
               << " flow_submit_wait_ms=" << nsToMs(flowSubmitWaitNs)
               << " flow_unpack_ms=" << nsToMs(flowUnpackNs)
               << " flow_export_direct_ms=" << nsToMs(flowExportDirectNs)
-              << " flow_export_resize_ms=" << nsToMs(flowExportResizeNs) << '\n';
-    std::cerr << "  flow_cpu_prep_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCpuPrepNs) / flowCalls : 0.0)
+              << " flow_export_resize_ms=" << nsToMs(flowExportResizeNs)
+              << " flow_cleanup_ms=" << nsToMs(flowCleanupNs) << '\n';
+    std::cerr << "  flow_upload_record_ms=" << nsToMs(flowUploadRecordNs)
+              << " flow_preproc_record_ms=" << nsToMs(flowPreprocRecordNs)
+              << " flow_inference_record_ms=" << nsToMs(flowInferenceRecordNs)
+              << " flow_output_record_ms=" << nsToMs(flowOutputRecordNs) << '\n';
+    std::cerr << "  flow_setup_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSetupNs) / flowCalls : 0.0)
+              << " flow_cpu_prep_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCpuPrepNs) / flowCalls : 0.0)
               << " flow_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCommandRecordNs) / flowCalls : 0.0)
               << " flow_submit_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSubmitWaitNs) / flowCalls : 0.0)
               << " flow_unpack_avg_ms=" << (flowCalls > 0 ? nsToMs(flowUnpackNs) / flowCalls : 0.0)
               << " flow_export_direct_avg_ms=" << (flowCalls > 0 ? nsToMs(flowExportDirectNs) / flowCalls : 0.0)
-              << " flow_export_resize_avg_ms=" << (flowCalls > 0 ? nsToMs(flowExportResizeNs) / flowCalls : 0.0) << '\n';
+              << " flow_export_resize_avg_ms=" << (flowCalls > 0 ? nsToMs(flowExportResizeNs) / flowCalls : 0.0)
+              << " flow_cleanup_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCleanupNs) / flowCalls : 0.0) << '\n';
     std::cerr << "  semaphore_wait_ms=" << nsToMs(semaphoreWaitNs)
               << " local_wait_ms=" << nsToMs(localSemaphoreWaitNs)
               << " shared_wait_ms=" << nsToMs(sharedSemaphoreWaitNs)
@@ -784,6 +812,7 @@ static int processFlowWithSemaphores(const RIFE* const rife,
                                      int64_t* waitNs = nullptr,
                                      int64_t* localWaitNs = nullptr,
                                      int64_t* sharedWaitNs = nullptr,
+                                     int64_t* rifeProcessWallNs = nullptr,
                                      FlowPerfBreakdown* flowPerf = nullptr) noexcept {
     int64_t localWait{};
     int64_t sharedWait{};
@@ -812,7 +841,10 @@ static int processFlowWithSemaphores(const RIFE* const rife,
     if (waitNs)
         *waitNs = localWait + sharedWait;
 
+    const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
     const auto status = rife->process_flow(src0R, src0G, src0B, src1R, src1G, src1B, flowOut, width, height, stride, flowPerf);
+    if (rifeProcessWallNs)
+        *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
 
     if (sharedSemaphore)
         sharedSemaphore->release();
@@ -2195,6 +2227,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             int64_t semaphoreWaitNs{};
             int64_t localSemaphoreWaitNs{};
             int64_t sharedSemaphoreWaitNs{};
+            int64_t rifeProcessWallNs{};
             FlowPerfBreakdown flowPerf{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
             const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
@@ -2203,6 +2236,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                                           d->perfStats ? &semaphoreWaitNs : nullptr,
                                                           d->perfStats ? &localSemaphoreWaitNs : nullptr,
                                                           d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &rifeProcessWallNs : nullptr,
                                                           d->perfStats ? &flowPerf : nullptr);
             if (d->perfStats) {
                 accumulatePerfStat(d->perf->semaphoreWaitNs, semaphoreWaitNs);
@@ -2210,12 +2244,19 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                 accumulatePerfStat(d->perf->sharedSemaphoreWaitNs, sharedSemaphoreWaitNs);
                 accumulatePerfStat(d->perf->flowCalls, 1);
                 accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
+                accumulatePerfStat(d->perf->rifeProcessWallNs, rifeProcessWallNs);
+                accumulatePerfStat(d->perf->flowSetupNs, flowPerf.setupNs);
                 accumulatePerfStat(d->perf->flowCpuPrepNs, flowPerf.cpuPrepNs);
                 accumulatePerfStat(d->perf->flowCommandRecordNs, flowPerf.commandRecordNs);
+                accumulatePerfStat(d->perf->flowUploadRecordNs, flowPerf.uploadRecordNs);
+                accumulatePerfStat(d->perf->flowPreprocRecordNs, flowPerf.preprocRecordNs);
+                accumulatePerfStat(d->perf->flowInferenceRecordNs, flowPerf.inferenceRecordNs);
+                accumulatePerfStat(d->perf->flowOutputRecordNs, flowPerf.outputRecordNs);
                 accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
                 accumulatePerfStat(d->perf->flowUnpackNs, flowPerf.unpackNs);
                 accumulatePerfStat(d->perf->flowExportDirectNs, flowPerf.exportDirectNs);
                 accumulatePerfStat(d->perf->flowExportResizeNs, flowPerf.exportResizeNs);
+                accumulatePerfStat(d->perf->flowCleanupNs, flowPerf.cleanupNs);
             }
             if (status != 0) {
                 vsapi->freeFrame(current);
@@ -2373,6 +2414,7 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             int64_t semaphoreWaitNs{};
             int64_t localSemaphoreWaitNs{};
             int64_t sharedSemaphoreWaitNs{};
+            int64_t rifeProcessWallNs{};
             FlowPerfBreakdown flowPerf{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
             const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
@@ -2381,6 +2423,7 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
                                                           d->perfStats ? &semaphoreWaitNs : nullptr,
                                                           d->perfStats ? &localSemaphoreWaitNs : nullptr,
                                                           d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
+                                                          d->perfStats ? &rifeProcessWallNs : nullptr,
                                                           d->perfStats ? &flowPerf : nullptr);
             if (d->perfStats) {
                 accumulatePerfStat(d->perf->semaphoreWaitNs, semaphoreWaitNs);
@@ -2388,12 +2431,19 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
                 accumulatePerfStat(d->perf->sharedSemaphoreWaitNs, sharedSemaphoreWaitNs);
                 accumulatePerfStat(d->perf->flowCalls, 1);
                 accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
+                accumulatePerfStat(d->perf->rifeProcessWallNs, rifeProcessWallNs);
+                accumulatePerfStat(d->perf->flowSetupNs, flowPerf.setupNs);
                 accumulatePerfStat(d->perf->flowCpuPrepNs, flowPerf.cpuPrepNs);
                 accumulatePerfStat(d->perf->flowCommandRecordNs, flowPerf.commandRecordNs);
+                accumulatePerfStat(d->perf->flowUploadRecordNs, flowPerf.uploadRecordNs);
+                accumulatePerfStat(d->perf->flowPreprocRecordNs, flowPerf.preprocRecordNs);
+                accumulatePerfStat(d->perf->flowInferenceRecordNs, flowPerf.inferenceRecordNs);
+                accumulatePerfStat(d->perf->flowOutputRecordNs, flowPerf.outputRecordNs);
                 accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
                 accumulatePerfStat(d->perf->flowUnpackNs, flowPerf.unpackNs);
                 accumulatePerfStat(d->perf->flowExportDirectNs, flowPerf.exportDirectNs);
                 accumulatePerfStat(d->perf->flowExportResizeNs, flowPerf.exportResizeNs);
+                accumulatePerfStat(d->perf->flowCleanupNs, flowPerf.cleanupNs);
             }
             if (status != 0) {
                 vsapi->freeFrame(current);

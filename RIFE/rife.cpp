@@ -646,10 +646,20 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     if (collect_perf)
         *perf = {};
 
+    const auto setup_start_ns = collect_perf ? monotonic_now_ns() : 0;
     const int channels = 3;
 
     ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
     ncnn::VkAllocator* staging_vkallocator = vkdev->acquire_staging_allocator();
+    const auto finish = [&](const int status) {
+        const auto cleanup_start_ns = collect_perf ? monotonic_now_ns() : 0;
+        vkdev->reclaim_blob_allocator(blob_vkallocator);
+        vkdev->reclaim_staging_allocator(staging_vkallocator);
+        if (collect_perf)
+            perf->cleanupNs += monotonic_now_ns() - cleanup_start_ns;
+
+        return status;
+    };
 
     ncnn::Option opt = flownet.opt;
     opt.blob_vkallocator = blob_vkallocator;
@@ -670,6 +680,9 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     auto in1_r = in1.channel(0);
     auto in1_g = in1.channel(1);
     auto in1_b = in1.channel(2);
+    if (collect_perf)
+        perf->setupNs += monotonic_now_ns() - setup_start_ns;
+
     const auto cpu_prep_start_ns = collect_perf ? monotonic_now_ns() : 0;
     for (auto y = 0; y < h; y++) {
         for (auto x = 0; x < w; x++) {
@@ -689,11 +702,15 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
 
     ncnn::VkMat in0_gpu;
     ncnn::VkMat in1_gpu;
+    const auto upload_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
     cmd.record_clone(in0, in0_gpu, opt);
     cmd.record_clone(in1, in1_gpu, opt);
+    if (collect_perf)
+        perf->uploadRecordNs += monotonic_now_ns() - upload_record_start_ns;
 
     ncnn::VkMat in0_gpu_padded;
     ncnn::VkMat in1_gpu_padded;
+    const auto preproc_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
     {
         in0_gpu_padded.create(w_padded, h_padded, 3, in_out_tile_elemsize, 1, blob_vkallocator);
 
@@ -728,9 +745,12 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
 
         cmd.record_pipeline(rife_preproc, bindings, constants, in1_gpu_padded);
     }
+    if (collect_perf)
+        perf->preprocRecordNs += monotonic_now_ns() - preproc_record_start_ns;
 
     ncnn::VkMat flow;
     {
+        const auto inference_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
         ncnn::Extractor ex = flownet.create_extractor();
         ex.set_blob_vkallocator(blob_vkallocator);
         ex.set_workspace_vkallocator(blob_vkallocator);
@@ -758,9 +778,9 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
 
             if (!extract_v4_flow_blob(ex, cmd, flow, rife_v4_flow_blob_name))
             {
-                vkdev->reclaim_blob_allocator(blob_vkallocator);
-                vkdev->reclaim_staging_allocator(staging_vkallocator);
-                return -1;
+                if (collect_perf)
+                    perf->inferenceRecordNs += monotonic_now_ns() - inference_record_start_ns;
+                return finish(-1);
             }
         }
         else if (use_flow_scale)
@@ -786,6 +806,8 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             ex.input("input1", in1_gpu_padded);
             ex.extract("flow", flow, cmd);
         }
+        if (collect_perf)
+            perf->inferenceRecordNs += monotonic_now_ns() - inference_record_start_ns;
     }
 
     ncnn::Mat flow_cpu;
@@ -797,6 +819,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     const bool require_gpu_resize = flow_needs_resize && flow_resize_mode == FlowResizeMode::ForceGPU;
     if (can_try_gpu_resize)
     {
+        const auto output_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
         ncnn::VkMat flow_resized_gpu;
         if (rife_flow_resize_output->forward(flow, flow_resized_gpu, cmd, opt) == 0)
         {
@@ -805,40 +828,35 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             {
                 cmd.record_clone(flow_scaled_gpu, flow_cpu, opt);
                 if (collect_perf)
+                    perf->outputRecordNs += monotonic_now_ns() - output_record_start_ns;
+                if (collect_perf)
                     perf->commandRecordNs += monotonic_now_ns() - command_record_start_ns;
                 const auto submit_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
                 if (cmd.submit_and_wait() != 0)
-                {
-                    vkdev->reclaim_blob_allocator(blob_vkallocator);
-                    vkdev->reclaim_staging_allocator(staging_vkallocator);
-                    return -1;
-                }
+                    return finish(-1);
                 if (collect_perf)
                     perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
                 used_gpu_resize = true;
             }
         }
+        if (collect_perf && !used_gpu_resize)
+            perf->outputRecordNs += monotonic_now_ns() - output_record_start_ns;
     }
 
     if (!used_gpu_resize)
     {
         if (require_gpu_resize)
-        {
-            vkdev->reclaim_blob_allocator(blob_vkallocator);
-            vkdev->reclaim_staging_allocator(staging_vkallocator);
-            return -1;
-        }
+            return finish(-1);
 
+        const auto output_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
         cmd.record_clone(flow, flow_cpu, opt);
+        if (collect_perf)
+            perf->outputRecordNs += monotonic_now_ns() - output_record_start_ns;
         if (collect_perf)
             perf->commandRecordNs += monotonic_now_ns() - command_record_start_ns;
         const auto submit_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
         if (cmd.submit_and_wait() != 0)
-        {
-            vkdev->reclaim_blob_allocator(blob_vkallocator);
-            vkdev->reclaim_staging_allocator(staging_vkallocator);
-            return -1;
-        }
+            return finish(-1);
         if (collect_perf)
             perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
     }
@@ -846,11 +864,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     ncnn::Mat flow_cpu_unpacked;
     const auto unpack_start_ns = collect_perf ? monotonic_now_ns() : 0;
     if (unpack_flow_channels(flow_cpu, flow_cpu_unpacked) != 0)
-    {
-        vkdev->reclaim_blob_allocator(blob_vkallocator);
-        vkdev->reclaim_staging_allocator(staging_vkallocator);
-        return -1;
-    }
+        return finish(-1);
     if (collect_perf)
         perf->unpackNs += monotonic_now_ns() - unpack_start_ns;
 
@@ -872,14 +886,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     else
         export_status = -1;
     if (export_status != 0)
-    {
-        vkdev->reclaim_blob_allocator(blob_vkallocator);
-        vkdev->reclaim_staging_allocator(staging_vkallocator);
-        return -1;
-    }
+        return finish(-1);
 
-    vkdev->reclaim_blob_allocator(blob_vkallocator);
-    vkdev->reclaim_staging_allocator(staging_vkallocator);
-
-    return 0;
+    return finish(0);
 }
