@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include "allocator.h"
 #include "benchmark.h"
 
 #include "rife_preproc.comp.hex.h"
@@ -945,56 +946,71 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             perf->inferenceRecordNs += monotonic_now_ns() - inference_record_start_ns;
     }
 
-    ncnn::Mat flow_cpu;
+    ncnn::VkMat flow_readback_source = flow;
+    ncnn::VkMat flow_staging;
     bool used_gpu_resize{};
     const bool flow_needs_resize = flow.w < w || flow.h < h;
     const bool can_try_gpu_resize = flow_needs_resize &&
                                     flow_resize_mode != FlowResizeMode::ForceCPU &&
                                     vkdev && rife_flow_resize_output && rife_flow_double_vectors;
     const bool require_gpu_resize = flow_needs_resize && flow_resize_mode == FlowResizeMode::ForceGPU;
+
+    const auto output_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
     if (can_try_gpu_resize)
     {
-        const auto output_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
         ncnn::VkMat flow_resized_gpu;
         if (rife_flow_resize_output->forward(flow, flow_resized_gpu, cmd, opt) == 0)
         {
             ncnn::VkMat flow_scaled_gpu;
             if (rife_flow_double_vectors->forward(flow_resized_gpu, flow_scaled_gpu, cmd, opt) == 0)
             {
-                cmd.record_clone(flow_scaled_gpu, flow_cpu, opt);
-                if (collect_perf)
-                    perf->outputRecordNs += monotonic_now_ns() - output_record_start_ns;
-                if (collect_perf)
-                    perf->commandRecordNs += monotonic_now_ns() - command_record_start_ns;
-                const auto submit_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
-                if (cmd.submit_and_wait() != 0)
-                    return finish(-1);
-                if (collect_perf)
-                    perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
+                flow_readback_source = flow_scaled_gpu;
                 used_gpu_resize = true;
             }
         }
-        if (collect_perf && !used_gpu_resize)
-            perf->outputRecordNs += monotonic_now_ns() - output_record_start_ns;
     }
 
-    if (!used_gpu_resize)
-    {
-        if (require_gpu_resize)
-            return finish(-1);
+    if (!used_gpu_resize && require_gpu_resize)
+        return finish(-1);
 
-        const auto output_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        cmd.record_clone(flow, flow_cpu, opt);
-        if (collect_perf)
-            perf->outputRecordNs += monotonic_now_ns() - output_record_start_ns;
-        if (collect_perf)
-            perf->commandRecordNs += monotonic_now_ns() - command_record_start_ns;
-        const auto submit_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        if (cmd.submit_and_wait() != 0)
-            return finish(-1);
-        if (collect_perf)
-            perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
-    }
+    ncnn::Option opt_staging = opt;
+    opt_staging.blob_vkallocator = staging_vkallocator;
+    const auto readback_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
+    cmd.record_clone(flow_readback_source, flow_staging, opt_staging);
+    if (collect_perf)
+        perf->readbackRecordNs += monotonic_now_ns() - readback_record_start_ns;
+    if (flow_staging.empty())
+        return finish(-1);
+    if (collect_perf)
+        perf->readbackBytes += static_cast<int64_t>(flow_staging.total() * flow_staging.elemsize);
+    if (collect_perf)
+        perf->outputRecordNs += monotonic_now_ns() - output_record_start_ns;
+    if (collect_perf)
+        perf->commandRecordNs += monotonic_now_ns() - command_record_start_ns;
+
+    const auto submit_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
+    if (cmd.submit_and_wait() != 0)
+        return finish(-1);
+    if (collect_perf)
+        perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
+
+    if (!flow_staging.allocator || !flow_staging.data || !flow_staging.mapped_ptr())
+        return finish(-1);
+    flow_staging.data->access_flags = VK_ACCESS_HOST_READ_BIT;
+    flow_staging.data->stage_flags = VK_PIPELINE_STAGE_HOST_BIT;
+
+    const auto readback_invalidate_start_ns = collect_perf ? monotonic_now_ns() : 0;
+    if (flow_staging.allocator->invalidate(flow_staging.data) != 0)
+        return finish(-1);
+    if (collect_perf)
+        perf->readbackInvalidateNs += monotonic_now_ns() - readback_invalidate_start_ns;
+
+    const auto readback_map_start_ns = collect_perf ? monotonic_now_ns() : 0;
+    const auto flow_cpu = flow_staging.mapped();
+    if (flow_cpu.empty())
+        return finish(-1);
+    if (collect_perf)
+        perf->readbackMapNs += monotonic_now_ns() - readback_map_start_ns;
 
     int export_status{};
     if (flow_cpu.w >= w && flow_cpu.h >= h)

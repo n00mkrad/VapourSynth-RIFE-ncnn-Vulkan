@@ -24,11 +24,15 @@ struct FlowPerfBreakdown final {
     int64_t preprocRecordNs{};
     int64_t inferenceRecordNs{};
     int64_t outputRecordNs{};
+    int64_t readbackRecordNs{};
     int64_t submitWaitNs{};
+    int64_t readbackInvalidateNs{};
+    int64_t readbackMapNs{};
     int64_t unpackNs{};
     int64_t exportDirectNs{};
     int64_t exportResizeNs{};
     int64_t cleanupNs{};
+    int64_t readbackBytes{};
 };
 
 class RIFE

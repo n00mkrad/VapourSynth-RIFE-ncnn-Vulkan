@@ -48,11 +48,15 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> flowPreprocRecordNs{ 0 };
     std::atomic<int64_t> flowInferenceRecordNs{ 0 };
     std::atomic<int64_t> flowOutputRecordNs{ 0 };
+    std::atomic<int64_t> flowReadbackRecordNs{ 0 };
     std::atomic<int64_t> flowSubmitWaitNs{ 0 };
+    std::atomic<int64_t> flowReadbackInvalidateNs{ 0 };
+    std::atomic<int64_t> flowReadbackMapNs{ 0 };
     std::atomic<int64_t> flowUnpackNs{ 0 };
     std::atomic<int64_t> flowExportDirectNs{ 0 };
     std::atomic<int64_t> flowExportResizeNs{ 0 };
     std::atomic<int64_t> flowCleanupNs{ 0 };
+    std::atomic<int64_t> flowReadbackBytes{ 0 };
     std::atomic<int64_t> lumaBuildNs{ 0 };
     std::atomic<int64_t> vectorPackNs{ 0 };
     std::atomic<int64_t> renderSadMaskNs{ 0 };
@@ -348,6 +352,10 @@ static double nsToMs(const int64_t ns) noexcept {
     return static_cast<double>(ns) / 1'000'000.0;
 }
 
+static double bytesToMiB(const int64_t bytes) noexcept {
+    return static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
+
 static int64_t roundPositiveAverageToInt64(const int64_t sum, const int64_t count) noexcept {
     if (count <= 0)
         return 0;
@@ -380,18 +388,23 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto flowPreprocRecordNs = stats.flowPreprocRecordNs.load(std::memory_order_relaxed);
     const auto flowInferenceRecordNs = stats.flowInferenceRecordNs.load(std::memory_order_relaxed);
     const auto flowOutputRecordNs = stats.flowOutputRecordNs.load(std::memory_order_relaxed);
+    const auto flowReadbackRecordNs = stats.flowReadbackRecordNs.load(std::memory_order_relaxed);
     const auto flowSubmitWaitNs = stats.flowSubmitWaitNs.load(std::memory_order_relaxed);
+    const auto flowReadbackInvalidateNs = stats.flowReadbackInvalidateNs.load(std::memory_order_relaxed);
+    const auto flowReadbackMapNs = stats.flowReadbackMapNs.load(std::memory_order_relaxed);
     const auto flowUnpackNs = stats.flowUnpackNs.load(std::memory_order_relaxed);
     const auto flowExportDirectNs = stats.flowExportDirectNs.load(std::memory_order_relaxed);
     const auto flowExportResizeNs = stats.flowExportResizeNs.load(std::memory_order_relaxed);
     const auto flowCleanupNs = stats.flowCleanupNs.load(std::memory_order_relaxed);
+    const auto flowReadbackBytes = stats.flowReadbackBytes.load(std::memory_order_relaxed);
     const auto lumaBuildNs = stats.lumaBuildNs.load(std::memory_order_relaxed);
     const auto vectorPackNs = stats.vectorPackNs.load(std::memory_order_relaxed);
     const auto renderSadMaskNs = stats.renderSadMaskNs.load(std::memory_order_relaxed);
     const auto displacementBuildNs = stats.displacementBuildNs.load(std::memory_order_relaxed);
     const auto composeNs = stats.composeNs.load(std::memory_order_relaxed);
     const auto rifeProcessAccountedNs = flowSetupNs + flowCpuPrepNs + flowCommandRecordNs + flowSubmitWaitNs +
-                                        flowUnpackNs + flowExportDirectNs + flowExportResizeNs + flowCleanupNs;
+                                        flowReadbackInvalidateNs + flowReadbackMapNs + flowUnpackNs +
+                                        flowExportDirectNs + flowExportResizeNs + flowCleanupNs;
     const auto rifeProcessUnaccountedNs = rifeProcessWallNs - rifeProcessAccountedNs;
 
     std::cerr << std::fixed << std::setprecision(3);
@@ -419,11 +432,19 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     std::cerr << "  flow_upload_record_ms=" << nsToMs(flowUploadRecordNs)
               << " flow_preproc_record_ms=" << nsToMs(flowPreprocRecordNs)
               << " flow_inference_record_ms=" << nsToMs(flowInferenceRecordNs)
-              << " flow_output_record_ms=" << nsToMs(flowOutputRecordNs) << '\n';
+              << " flow_output_record_ms=" << nsToMs(flowOutputRecordNs)
+              << " flow_readback_record_ms=" << nsToMs(flowReadbackRecordNs) << '\n';
+    std::cerr << "  flow_readback_mib=" << bytesToMiB(flowReadbackBytes)
+              << " flow_readback_avg_mib=" << (flowCalls > 0 ? bytesToMiB(flowReadbackBytes) / flowCalls : 0.0)
+              << " flow_readback_invalidate_ms=" << nsToMs(flowReadbackInvalidateNs)
+              << " flow_readback_map_ms=" << nsToMs(flowReadbackMapNs) << '\n';
     std::cerr << "  flow_setup_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSetupNs) / flowCalls : 0.0)
               << " flow_cpu_prep_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCpuPrepNs) / flowCalls : 0.0)
               << " flow_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCommandRecordNs) / flowCalls : 0.0)
+              << " flow_readback_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowReadbackRecordNs) / flowCalls : 0.0)
               << " flow_submit_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSubmitWaitNs) / flowCalls : 0.0)
+              << " flow_readback_invalidate_avg_ms=" << (flowCalls > 0 ? nsToMs(flowReadbackInvalidateNs) / flowCalls : 0.0)
+              << " flow_readback_map_avg_ms=" << (flowCalls > 0 ? nsToMs(flowReadbackMapNs) / flowCalls : 0.0)
               << " flow_unpack_avg_ms=" << (flowCalls > 0 ? nsToMs(flowUnpackNs) / flowCalls : 0.0)
               << " flow_export_direct_avg_ms=" << (flowCalls > 0 ? nsToMs(flowExportDirectNs) / flowCalls : 0.0)
               << " flow_export_resize_avg_ms=" << (flowCalls > 0 ? nsToMs(flowExportResizeNs) / flowCalls : 0.0)
@@ -2231,11 +2252,15 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                 accumulatePerfStat(d->perf->flowPreprocRecordNs, flowPerf.preprocRecordNs);
                 accumulatePerfStat(d->perf->flowInferenceRecordNs, flowPerf.inferenceRecordNs);
                 accumulatePerfStat(d->perf->flowOutputRecordNs, flowPerf.outputRecordNs);
+                accumulatePerfStat(d->perf->flowReadbackRecordNs, flowPerf.readbackRecordNs);
                 accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
+                accumulatePerfStat(d->perf->flowReadbackInvalidateNs, flowPerf.readbackInvalidateNs);
+                accumulatePerfStat(d->perf->flowReadbackMapNs, flowPerf.readbackMapNs);
                 accumulatePerfStat(d->perf->flowUnpackNs, flowPerf.unpackNs);
                 accumulatePerfStat(d->perf->flowExportDirectNs, flowPerf.exportDirectNs);
                 accumulatePerfStat(d->perf->flowExportResizeNs, flowPerf.exportResizeNs);
                 accumulatePerfStat(d->perf->flowCleanupNs, flowPerf.cleanupNs);
+                accumulatePerfStat(d->perf->flowReadbackBytes, flowPerf.readbackBytes);
             }
             if (status != 0) {
                 vsapi->freeFrame(current);
@@ -2418,11 +2443,15 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
                 accumulatePerfStat(d->perf->flowPreprocRecordNs, flowPerf.preprocRecordNs);
                 accumulatePerfStat(d->perf->flowInferenceRecordNs, flowPerf.inferenceRecordNs);
                 accumulatePerfStat(d->perf->flowOutputRecordNs, flowPerf.outputRecordNs);
+                accumulatePerfStat(d->perf->flowReadbackRecordNs, flowPerf.readbackRecordNs);
                 accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
+                accumulatePerfStat(d->perf->flowReadbackInvalidateNs, flowPerf.readbackInvalidateNs);
+                accumulatePerfStat(d->perf->flowReadbackMapNs, flowPerf.readbackMapNs);
                 accumulatePerfStat(d->perf->flowUnpackNs, flowPerf.unpackNs);
                 accumulatePerfStat(d->perf->flowExportDirectNs, flowPerf.exportDirectNs);
                 accumulatePerfStat(d->perf->flowExportResizeNs, flowPerf.exportResizeNs);
                 accumulatePerfStat(d->perf->flowCleanupNs, flowPerf.cleanupNs);
+                accumulatePerfStat(d->perf->flowReadbackBytes, flowPerf.readbackBytes);
             }
             if (status != 0) {
                 vsapi->freeFrame(current);
