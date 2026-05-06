@@ -304,7 +304,7 @@ int RIFE::load(const std::string& modeldir)
             {
                 ncnn::MutexLockGuard guard(lock);
                 if (spirv.empty())
-                    compile_spirv_module(rife_preproc_comp_data, sizeof(rife_preproc_comp_data), opt, spirv);
+                    compile_spirv_module(rife_preproc_comp_data, static_cast<int>(sizeof(rife_preproc_comp_data) - 1), opt, spirv);
             }
 
             rife_preproc = new ncnn::Pipeline(vkdev);
@@ -637,6 +637,38 @@ static int64_t monotonic_now_ns()
         .count();
 }
 
+static void copy_plane_to_ncnn_input(const float* src, const ptrdiff_t src_stride, float* dst, const int w, const int h) noexcept
+{
+    if (src_stride == w)
+    {
+        std::memcpy(dst, src, static_cast<size_t>(w) * h * sizeof(float));
+        return;
+    }
+
+    for (auto y = 0; y < h; y++)
+        std::memcpy(dst + static_cast<size_t>(y) * w, src + src_stride * y, static_cast<size_t>(w) * sizeof(float));
+}
+
+static void scale_plane_to_ncnn_input(const float* src, const ptrdiff_t src_stride, float* dst, const int w, const int h) noexcept
+{
+    constexpr float inputScale = 255.0f;
+    if (src_stride == w)
+    {
+        const auto pixelCount = static_cast<size_t>(w) * h;
+        for (size_t i = 0; i < pixelCount; i++)
+            dst[i] = src[i] * inputScale;
+        return;
+    }
+
+    for (auto y = 0; y < h; y++)
+    {
+        const auto* srcRow = src + src_stride * y;
+        auto* dstRow = dst + static_cast<size_t>(y) * w;
+        for (auto x = 0; x < w; x++)
+            dstRow[x] = srcRow[x] * inputScale;
+    }
+}
+
 int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0B,
                        const float* src1R, const float* src1G, const float* src1B,
                        float* flow_out, const int w, const int h, const ptrdiff_t stride,
@@ -674,25 +706,33 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     ncnn::Mat in1;
     in0.create(w, h, channels, sizeof(float), 1);
     in1.create(w, h, channels, sizeof(float), 1);
-    auto in0_r = in0.channel(0);
-    auto in0_g = in0.channel(1);
-    auto in0_b = in0.channel(2);
-    auto in1_r = in1.channel(0);
-    auto in1_g = in1.channel(1);
-    auto in1_b = in1.channel(2);
+    auto* in0_r = static_cast<float*>(in0.channel(0));
+    auto* in0_g = static_cast<float*>(in0.channel(1));
+    auto* in0_b = static_cast<float*>(in0.channel(2));
+    auto* in1_r = static_cast<float*>(in1.channel(0));
+    auto* in1_g = static_cast<float*>(in1.channel(1));
+    auto* in1_b = static_cast<float*>(in1.channel(2));
     if (collect_perf)
         perf->setupNs += monotonic_now_ns() - setup_start_ns;
 
     const auto cpu_prep_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    for (auto y = 0; y < h; y++) {
-        for (auto x = 0; x < w; x++) {
-            in0_r[w * y + x] = src0R[stride * y + x] * 255.0f;
-            in0_g[w * y + x] = src0G[stride * y + x] * 255.0f;
-            in0_b[w * y + x] = src0B[stride * y + x] * 255.0f;
-            in1_r[w * y + x] = src1R[stride * y + x] * 255.0f;
-            in1_g[w * y + x] = src1G[stride * y + x] * 255.0f;
-            in1_b[w * y + x] = src1B[stride * y + x] * 255.0f;
-        }
+    if (opt.use_int8_storage)
+    {
+        scale_plane_to_ncnn_input(src0R, stride, in0_r, w, h);
+        scale_plane_to_ncnn_input(src0G, stride, in0_g, w, h);
+        scale_plane_to_ncnn_input(src0B, stride, in0_b, w, h);
+        scale_plane_to_ncnn_input(src1R, stride, in1_r, w, h);
+        scale_plane_to_ncnn_input(src1G, stride, in1_g, w, h);
+        scale_plane_to_ncnn_input(src1B, stride, in1_b, w, h);
+    }
+    else
+    {
+        copy_plane_to_ncnn_input(src0R, stride, in0_r, w, h);
+        copy_plane_to_ncnn_input(src0G, stride, in0_g, w, h);
+        copy_plane_to_ncnn_input(src0B, stride, in0_b, w, h);
+        copy_plane_to_ncnn_input(src1R, stride, in1_r, w, h);
+        copy_plane_to_ncnn_input(src1G, stride, in1_g, w, h);
+        copy_plane_to_ncnn_input(src1B, stride, in1_b, w, h);
     }
     if (collect_perf)
         perf->cpuPrepNs += monotonic_now_ns() - cpu_prep_start_ns;
