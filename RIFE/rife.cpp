@@ -16,19 +16,21 @@
 #include "rife_preproc.comp.hex.h"
 #include "rife_v4_timestep.comp.hex.h"
 #include "rife_mv_reduce.comp.hex.h"
+#include "rife_mv_full.comp.hex.h"
 
 #include "rife_ops.h"
 
 DEFINE_LAYER_CREATOR(Warp)
 
 RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding,
-           FlowResizeMode _flow_resize_mode, bool _disable_vulkan_fp16)
+           FlowResizeMode _flow_resize_mode, bool _disable_vulkan_fp16, bool _enable_gpu_mv_full)
 {
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
 
     rife_preproc = 0;
     rife_v4_timestep = 0;
     rife_mv_reduce = 0;
+    rife_mv_full = 0;
     rife_flow_scale_image = 0;
     rife_flow_resize_flow = 0;
     rife_flow_scale_vectors = 0;
@@ -43,6 +45,7 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     rife_v2 = _rife_v2;
     rife_v4 = _rife_v4;
     disable_vulkan_fp16 = _disable_vulkan_fp16;
+    enable_gpu_mv_full = _enable_gpu_mv_full;
     padding = _padding;
     rife_v4_flow_blob_name.clear();
 }
@@ -52,6 +55,7 @@ RIFE::~RIFE()
     delete rife_preproc;
     delete rife_v4_timestep;
     delete rife_mv_reduce;
+    delete rife_mv_full;
 
     if (use_flow_scale)
     {
@@ -329,6 +333,22 @@ int RIFE::load(const std::string& modeldir)
             rife_mv_reduce->set_optimal_local_size_xyz(64, 1, 1);
             std::vector<ncnn::vk_specialization_type> reduceSpecializations;
             rife_mv_reduce->create(spirv.data(), spirv.size() * 4, reduceSpecializations);
+        }
+
+        if (enable_gpu_mv_full)
+        {
+            std::vector<uint32_t> spirv;
+            static ncnn::Mutex lock;
+            {
+                ncnn::MutexLockGuard guard(lock);
+                if (spirv.empty())
+                    compile_spirv_module(rife_mv_full_comp_data, static_cast<int>(sizeof(rife_mv_full_comp_data) - 1), opt, spirv);
+            }
+
+            rife_mv_full = new ncnn::Pipeline(vkdev);
+            rife_mv_full->set_optimal_local_size_xyz(64, 1, 1);
+            std::vector<ncnn::vk_specialization_type> fullSpecializations;
+            rife_mv_full->create(spirv.data(), spirv.size() * 4, fullSpecializations);
         }
 
     }
@@ -726,6 +746,17 @@ static int copy_reduced_flow_output_direct_from_ncnn(const ncnn::Mat& reduced_fl
     return 0;
 }
 
+static int copy_gpu_motion_vector_output_direct_from_ncnn(const ncnn::Mat& vector_cpu, RIFEGpuMotionVector* vectors_out,
+                                                          const int vector_count)
+{
+    if (vector_cpu.dims != 1 || vector_cpu.w < vector_count ||
+        vector_cpu.elempack != 4 || vector_cpu.elemsize != sizeof(RIFEGpuMotionVector))
+        return -1;
+
+    std::memcpy(vectors_out, vector_cpu.data, static_cast<size_t>(vector_count) * sizeof(RIFEGpuMotionVector));
+    return 0;
+}
+
 static bool extract_v4_flow_blob(ncnn::Extractor& ex, ncnn::VkCompute& cmd, ncnn::VkMat& flow,
                                  const std::string& preferred_flow_blob_name)
 {
@@ -797,6 +828,7 @@ static void scale_plane_to_ncnn_input(const float* src, const ptrdiff_t src_stri
 int RIFE::process_flow_internal(const float* src0R, const float* src0G, const float* src0B,
                                 const float* src1R, const float* src1G, const float* src1B,
                                 float* flow_out, RIFEReducedFlowBlock* reduced_flow_out, const RIFEFlowReduceConfig* reduce_config,
+                                RIFEGpuMotionVector* vectors_out, const RIFEGpuMotionVectorConfig* vector_config,
                                 const int w, const int h, const ptrdiff_t stride,
                                 FlowPerfBreakdown* perf) const
 {
@@ -1004,6 +1036,10 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         return finish(-1);
 
     const auto reduced_output = reduce_config != nullptr;
+    const auto vector_output = vector_config != nullptr;
+    if (reduced_output && vector_output)
+        return finish(-1);
+
     if (reduced_output)
     {
         if (!rife_mv_reduce || !reduced_flow_out || reduce_config->blockCountX <= 0 || reduce_config->blockCountY <= 0)
@@ -1040,6 +1076,66 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         flow_readback_source = reduced_flow_gpu;
         if (collect_perf)
             perf->flowReduceRecordNs += monotonic_now_ns() - reduce_record_start_ns;
+    }
+
+    if (vector_output)
+    {
+        if (!rife_mv_full || !vectors_out || vector_config->blockCountX <= 0 || vector_config->blockCountY <= 0)
+            return finish(-1);
+        if (flow_readback_source.w < w || flow_readback_source.h < h || flow_readback_source.elempack != 4)
+            return finish(-1);
+        if (in0_gpu.w != w || in0_gpu.h != h || in1_gpu.w != w || in1_gpu.h != h ||
+            in0_gpu.c < 3 || in1_gpu.c < 3 || in0_gpu.elempack != 1 || in1_gpu.elempack != 1 ||
+            in0_gpu.elemsize != sizeof(float) || in1_gpu.elemsize != sizeof(float))
+            return finish(-1);
+
+        const auto vector_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
+        const auto block_count = vector_config->blockCountX * vector_config->blockCountY;
+        ncnn::VkMat vectors_gpu;
+        vectors_gpu.create(block_count * 2, sizeof(RIFEGpuMotionVector), 4, blob_vkallocator);
+        if (vectors_gpu.empty())
+            return finish(-1);
+
+        std::vector<ncnn::VkMat> bindings(4);
+        bindings[0] = flow_readback_source;
+        bindings[1] = in0_gpu;
+        bindings[2] = in1_gpu;
+        bindings[3] = vectors_gpu;
+
+        std::vector<ncnn::vk_constant_type> constants(28);
+        constants[0].i = flow_readback_source.w;
+        constants[1].i = w;
+        constants[2].i = h;
+        constants[3].i = in0_gpu.w;
+        constants[4].i = in0_gpu.h;
+        constants[5].i = static_cast<int>(in0_gpu.cstep);
+        constants[6].i = vector_config->blockCountX;
+        constants[7].i = vector_config->blockCountY;
+        constants[8].i = vector_config->blockSizeX;
+        constants[9].i = vector_config->blockSizeY;
+        constants[10].i = vector_config->stepX;
+        constants[11].i = vector_config->stepY;
+        constants[12].i = vector_config->hPadding;
+        constants[13].i = vector_config->vPadding;
+        constants[14].i = vector_config->internalBlockSizeX;
+        constants[15].i = vector_config->internalBlockSizeY;
+        constants[16].i = vector_config->internalStepX;
+        constants[17].i = vector_config->internalStepY;
+        constants[18].i = vector_config->internalHPadding;
+        constants[19].i = vector_config->internalVPadding;
+        constants[20].i = vector_config->pel;
+        constants[21].i = vector_config->blockReduce;
+        constants[22].i = 0;
+        constants[23].i = 0;
+        constants[24].f = vector_config->motionScaleX;
+        constants[25].f = vector_config->motionScaleY;
+        constants[26].f = static_cast<float>((1ULL << vector_config->bits) - 1ULL);
+        constants[27].f = 0.0f;
+
+        cmd.record_pipeline(rife_mv_full, bindings, constants, vectors_gpu);
+        flow_readback_source = vectors_gpu;
+        if (collect_perf)
+            perf->flowVectorRecordNs += monotonic_now_ns() - vector_record_start_ns;
     }
 
     ncnn::Option opt_staging = opt;
@@ -1089,6 +1185,13 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         if (collect_perf)
             perf->exportDirectNs += monotonic_now_ns() - export_start_ns;
     }
+    else if (vector_output)
+    {
+        const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
+        export_status = copy_gpu_motion_vector_output_direct_from_ncnn(flow_cpu, vectors_out, vector_config->blockCountX * vector_config->blockCountY * 2);
+        if (collect_perf)
+            perf->exportDirectNs += monotonic_now_ns() - export_start_ns;
+    }
     else if (flow_cpu.w >= w && flow_cpu.h >= h)
     {
         const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
@@ -1126,7 +1229,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
                        float* flow_out, const int w, const int h, const ptrdiff_t stride,
                        FlowPerfBreakdown* perf) const
 {
-    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, flow_out, nullptr, nullptr, w, h, stride, perf);
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, flow_out, nullptr, nullptr, nullptr, nullptr, w, h, stride, perf);
 }
 
 int RIFE::process_flow_reduced(const float* src0R, const float* src0G, const float* src0B,
@@ -1135,5 +1238,14 @@ int RIFE::process_flow_reduced(const float* src0R, const float* src0G, const flo
                                const int w, const int h, const ptrdiff_t stride,
                                FlowPerfBreakdown* perf) const
 {
-    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, nullptr, reduced_flow_out, &reduce_config, w, h, stride, perf);
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr, w, h, stride, perf);
+}
+
+int RIFE::process_motion_vectors_gpu(const float* src0R, const float* src0G, const float* src0B,
+                                     const float* src1R, const float* src1G, const float* src1B,
+                                     RIFEGpuMotionVector* vectors_out, const RIFEGpuMotionVectorConfig& vector_config,
+                                     const int w, const int h, const ptrdiff_t stride,
+                                     FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, nullptr, nullptr, nullptr, vectors_out, &vector_config, w, h, stride, perf);
 }
