@@ -43,7 +43,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - Exported motion-vector frames also include `RMV_AvgSad` as an integer 8x8-equivalent average SAD in MVTools threshold space, `RMV_AvgSadNorm` as an integer frame property preserving the previous raw average exported block SAD behavior, `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, `RMV_AvgSadHigh50Pct`, `RMV_AvgSadHigh75Pct`, `RMV_AvgSadLow2Pct`, `RMV_AvgSadLow10Pct`, `RMV_AvgSadLow25Pct`, `RMV_MaxSad`, `RMV_MinSad`, and `RMV_SadAvgDeviation` as integer 8x8-equivalent SAD summary properties, plus `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` as float frame properties. `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
-## Shared motion-vector arguments
+## Motion-vector arguments
 
 - `flow_scale`
   Scales the image before flow estimation and rescales vectors back to the original image coordinates. Smaller values can reduce cost and can sometimes behave better on large motion.
@@ -62,6 +62,17 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Omit this argument for automatic behavior (GPU resize when available, CPU fallback on failure).
   `False` (`0`) forces the GPU resize path only.
   `True` (`1`) forces the CPU resize fallback path.
+
+- `mv_export_backend`
+  Manual export backend used by `RIFEMV` after RIFE has produced optical flow.
+  Default: `"cpu"`.
+  This argument is not exposed by `RIFEMVApprox2` or `RIFEMVApprox3`.
+  Accepted values:
+  - `"cpu"` reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
+  - `"gpu_flow_reduce"` performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
+  - `"gpu_full"` performs flow reduction, vector conversion, clamping, and raw luma SAD on GPU, then reads back compact vector arrays. CPU still applies `sad_multiplier`, computes stats, and packs MVTools blobs.
+  `gpu_full` is currently limited to `chroma=0` and source-sized inference (`res_scale=1.0`). There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
+  See [GPU export modes](gpu-modes.md) for details and tradeoffs.
 
 - `shared_flow_inflight`
   Global in-flight cap for motion-vector flow inference shared across filter instances on the same GPU.
@@ -155,7 +166,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, mv_export_backend="cpu", perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -180,6 +191,9 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - `semaphore_wait_ms` total wait
 - `local_wait_ms` wait on per-filter `gpu_thread` limiter
 - `shared_wait_ms` wait on the cross-instance `shared_flow_inflight` limiter
+- `flow_readback_mib` and `flow_readback_avg_mib` GPU-to-CPU readback size
+- `flow_reduce_record_ms` GPU command recording time for `gpu_flow_reduce`
+- `flow_vector_record_ms` GPU command recording time for `gpu_full`
 - `render_sad_mask_ms` time spent rasterizing the `Gray8` SAD carrier plane when `render_sad_mask=True`
 
 `sad_multiplier`:
@@ -245,7 +259,7 @@ bw1, fw1, bw2, fw2, bw3, fw3 = core.rmv.RIFEMVApprox3(...)
 
 ### Shared arguments
 
-`RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it.
+`RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it, and they do not expose `mv_export_backend` because the approximation path still requires dense displacement data.
 
 ### Example with Degrain2
 
