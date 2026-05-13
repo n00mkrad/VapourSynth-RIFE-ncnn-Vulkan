@@ -63,15 +63,16 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   `False` (`0`) forces the GPU resize path only.
   `True` (`1`) forces the CPU resize fallback path.
 
-- `mv_export_backend`
+- `gpu_mode`
   Manual export backend used by `RIFEMV` after RIFE has produced optical flow.
-  Default: `"cpu"`.
+  Default: `0`.
   This argument is not exposed by `RIFEMVApprox2` or `RIFEMVApprox3`.
   Accepted values:
-  - `"cpu"` reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
-  - `"gpu_flow_reduce"` performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
-  - `"gpu_full"` performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD), then reads back compact vector arrays. CPU still applies `sad_multiplier`, computes stats, and packs MVTools blobs.
-  `gpu_full` is currently limited to source-sized inference (`res_scale=1.0`). There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
+  - `0` (`cpu`) reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
+  - `1` (`gpu_flow_reduce`) performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
+  - `2` (`gpu_full`) performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD), then reads back compact vector arrays. CPU still applies `sad_multiplier`, computes stats, and packs MVTools blobs.
+  `2` (`gpu_full`) is currently limited to source-sized inference (`res_scale=1.0`). There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
+  String values are not accepted.
   See [GPU export modes](gpu-modes.md) for details and tradeoffs.
 
 - `shared_flow_inflight`
@@ -166,7 +167,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, mv_export_backend="cpu", perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -259,7 +260,7 @@ bw1, fw1, bw2, fw2, bw3, fw3 = core.rmv.RIFEMVApprox3(...)
 
 ### Shared arguments
 
-`RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it, and they do not expose `mv_export_backend` because the approximation path still requires dense displacement data.
+`RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it, and they do not expose `gpu_mode` because the approximation path still requires dense displacement data.
 
 ### Example with Degrain2
 

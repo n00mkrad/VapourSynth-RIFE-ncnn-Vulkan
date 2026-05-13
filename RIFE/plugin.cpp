@@ -505,15 +505,17 @@ static const char* motionVectorExportBackendName(const MotionVectorExportBackend
     }
 }
 
-static MotionVectorExportBackend parseMotionVectorExportBackend(const char* const value) {
-    if (!value || std::strcmp(value, "cpu") == 0)
+static MotionVectorExportBackend parseMotionVectorExportBackend(const int value) {
+    switch (value) {
+    case 0:
         return MotionVectorExportBackend::Cpu;
-    if (std::strcmp(value, "gpu_flow_reduce") == 0)
+    case 1:
         return MotionVectorExportBackend::GpuFlowReduce;
-    if (std::strcmp(value, "gpu_full") == 0)
+    case 2:
         return MotionVectorExportBackend::GpuFull;
-
-    throw "mv_export_backend must be cpu, gpu_flow_reduce, or gpu_full";
+    default:
+        throw "gpu_mode must be 0 (cpu), 1 (gpu_flow_reduce), or 2 (gpu_full)";
+    }
 }
 
 static void printMotionVectorInvocation(const char* const functionName, const int gpuId, const int gpuThread,
@@ -534,7 +536,8 @@ static void printMotionVectorInvocation(const char* const functionName, const in
             << " flow_scale=" << flowScale
             << " res_scale=" << resScale
             << " cpu_flow_resize=" << flowResizeModeName(flowResizeMode)
-            << " mv_export_backend=" << motionVectorExportBackendName(mvExportBackend)
+            << " gpu_mode=" << static_cast<int>(mvExportBackend)
+            << " gpu_mode_name=" << motionVectorExportBackendName(mvExportBackend)
             << " perf_stats=" << perfStats
             << " blksize_x=" << config.blockSizeX
             << " blksize_y=" << config.blockSizeY
@@ -1263,13 +1266,13 @@ static void validateAbsSADClipRange(const int absSadClipRange) {
 static void validateGpuFullMotionVectorBackend(const MotionVectorConfig& config) {
     if (config.inferenceWidth != config.backwardAnalysisData.nWidth ||
         config.inferenceHeight != config.backwardAnalysisData.nHeight)
-        throw "mv_export_backend=gpu_full currently requires inference dimensions to match the source dimensions";
+        throw "gpu_mode=2 currently requires inference dimensions to match the source dimensions";
 
     const auto maxSample = (1ULL << config.bits) - 1ULL;
     const auto chromaScale = config.useChroma ? 3ULL : 1ULL;
     const auto maxRawSad = static_cast<unsigned long long>(config.blockSizeX) * config.blockSizeY * maxSample * chromaScale;
     if (maxRawSad > std::numeric_limits<uint32_t>::max())
-        throw "mv_export_backend=gpu_full raw SAD exceeds 32-bit storage for this block size and bit depth";
+        throw "gpu_mode=2 raw SAD exceeds 32-bit storage for this block size and bit depth";
 }
 
 static void loadRIFEModel(RIFE& rife, const std::string& modelPath) {
@@ -3075,8 +3078,11 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto cpuFlowResize{ vsapi->mapGetIntSaturated(in, "cpu_flow_resize", 0, &err) };
         if (!err)
             flowResizeMode = cpuFlowResize ? FlowResizeMode::ForceCPU : FlowResizeMode::ForceGPU;
-        const auto mvExportBackendValue = vsapi->mapGetData(in, "mv_export_backend", 0, &err);
-        pairData->mvExportBackend = parseMotionVectorExportBackend(err ? "cpu" : mvExportBackendValue);
+        const auto hasGpuMode = vsapi->mapNumElements(in, "gpu_mode") > 0;
+        const auto gpuMode = vsapi->mapGetIntSaturated(in, "gpu_mode", 0, &err);
+        if (hasGpuMode && err)
+            throw "gpu_mode must be an integer";
+        pairData->mvExportBackend = parseMotionVectorExportBackend(hasGpuMode ? static_cast<int>(gpuMode) : 0);
         const auto matrixInValue = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
         const auto* matrixIn = err ? "709" : matrixInValue;
         const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
@@ -3685,7 +3691,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
-                             "mv_export_backend:data:opt;"
+                             "gpu_mode:int:opt;"
                              "perf_stats:int:opt;"
                              "blksize_x:int:opt;"
                              "blksize_y:int:opt;"

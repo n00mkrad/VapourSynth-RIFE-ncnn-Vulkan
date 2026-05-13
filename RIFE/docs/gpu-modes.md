@@ -1,14 +1,21 @@
 # RIFEMV GPU Export Modes
 
-`RIFEMV` can use different export backends through `mv_export_backend`.
+`RIFEMV` can use different export backends through `gpu_mode`.
 
 This setting controls what happens after RIFE has produced dense optical flow. It does not select a different RIFE model and it does not retrain or alter model weights. The goal is to reduce CPU work and GPU-to-CPU readback while still exporting MVTools-compatible vector clips.
 
 The default is:
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, mv_export_backend="cpu")
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, gpu_mode=0)
 ```
+
+Mode mapping:
+- `0` = `cpu`
+- `1` = `gpu_flow_reduce`
+- `2` = `gpu_full`
+
+String values such as `"cpu"`, `"gpu_flow_reduce"`, and `"gpu_full"` are not accepted.
 
 `RIFEMVApprox2` and `RIFEMVApprox3` do not expose this option. They currently need dense displacement data for temporal composition, so they use the dense CPU export path internally.
 
@@ -16,17 +23,17 @@ mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, mv_export_backend="cpu")
 
 | Mode | Dense flow readback | GPU work after RIFE | CPU work after readback | Current status |
 |---|---:|---|---|---|
-| `"cpu"` | Full dense flow | none | flow reduction, vector conversion, SAD, stats, blob packing | safest default |
-| `"gpu_flow_reduce"` | compact block flow | flow reduction only | vector conversion, SAD, stats, blob packing | recommended GPU-assisted mode |
-| `"gpu_full"` | compact block vectors | flow reduction, vector conversion, clamping, raw SAD | `sad_multiplier`, stats, blob packing | experimental, narrower config support |
+| `0` (`cpu`) | Full dense flow | none | flow reduction, vector conversion, SAD, stats, blob packing | safest default |
+| `1` (`gpu_flow_reduce`) | compact block flow | flow reduction only | vector conversion, SAD, stats, blob packing | recommended GPU-assisted mode |
+| `2` (`gpu_full`) | compact block vectors | flow reduction, vector conversion, clamping, raw SAD | `sad_multiplier`, stats, blob packing | experimental, narrower config support |
 
 For a 1920x1024 clip using the default 16x8 blocks and 8x4 overlap, the approximate readback sizes are:
 
 | Mode | Approximate readback per flow call |
 |---|---:|
-| `"cpu"` | about 15 MiB |
-| `"gpu_flow_reduce"` | about 0.93 MiB |
-| `"gpu_full"` | about 1.86 MiB |
+| `0` (`cpu`) | about 15 MiB |
+| `1` (`gpu_flow_reduce`) | about 0.93 MiB |
+| `2` (`gpu_full`) | about 1.86 MiB |
 
 `gpu_full` reads back more than `gpu_flow_reduce` because it returns two compact vector arrays, one backward and one forward, including raw SAD. It can still be faster if moving SAD and vector generation to GPU saves enough CPU work.
 
@@ -130,11 +137,11 @@ Use this mode as an explicit experimental backend until it has been validated on
 
 ## Choosing A Mode
 
-Use `"cpu"` when correctness and broad compatibility matter more than speed, or when testing a setting that the GPU modes do not support.
+Use `gpu_mode=0` (`cpu`) when correctness and broad compatibility matter more than speed, or when testing a setting that the GPU modes do not support.
 
-Use `"gpu_flow_reduce"` when you want the main readback reduction with relatively low semantic risk. This is the best general performance mode to try first.
+Use `gpu_mode=1` (`gpu_flow_reduce`) when you want the main readback reduction with relatively low semantic risk. This is the best general performance mode to try first.
 
-Use `"gpu_full"` when you want to test whether moving vector and SAD work to GPU improves your workload. Expect it to be more configuration-sensitive than `gpu_flow_reduce`.
+Use `gpu_mode=2` (`gpu_full`) when you want to test whether moving vector and SAD work to GPU improves your workload. Expect it to be more configuration-sensitive than `gpu_flow_reduce`.
 
 Example:
 
@@ -142,7 +149,7 @@ Example:
 mvbw, mvfw = core.rmv.RIFEMV(
     clip,
     model_path=rife_mdl,
-    mv_export_backend="gpu_flow_reduce",
+    gpu_mode=1,
     blksize_x=16,
     blksize_y=8,
     overlap_x=8,
@@ -158,7 +165,7 @@ For `gpu_full`:
 mvbw, mvfw = core.rmv.RIFEMV(
     clip,
     model_path=rife_mdl,
-    mv_export_backend="gpu_full",
+    gpu_mode=2,
     res_scale=1.0,
     chroma=False,
     perf_stats=True,
