@@ -70,8 +70,8 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Accepted values:
   - `"cpu"` reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
   - `"gpu_flow_reduce"` performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
-  - `"gpu_full"` performs flow reduction, vector conversion, clamping, and raw luma SAD on GPU, then reads back compact vector arrays. CPU still applies `sad_multiplier`, computes stats, and packs MVTools blobs.
-  `gpu_full` is currently limited to `chroma=0` and source-sized inference (`res_scale=1.0`). There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
+  - `"gpu_full"` performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD), then reads back compact vector arrays. CPU still applies `sad_multiplier`, computes stats, and packs MVTools blobs.
+  `gpu_full` is currently limited to source-sized inference (`res_scale=1.0`). There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
   See [GPU export modes](gpu-modes.md) for details and tradeoffs.
 
 - `shared_flow_inflight`

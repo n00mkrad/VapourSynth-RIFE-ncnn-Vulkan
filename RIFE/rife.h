@@ -74,6 +74,7 @@ struct RIFEGpuMotionVectorConfig final {
     int pel;
     int blockReduce;
     int bits;
+    int useChroma;
     float motionScaleX;
     float motionScaleY;
 };

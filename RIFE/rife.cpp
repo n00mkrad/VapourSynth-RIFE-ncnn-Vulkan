@@ -1125,7 +1125,7 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         constants[19].i = vector_config->internalVPadding;
         constants[20].i = vector_config->pel;
         constants[21].i = vector_config->blockReduce;
-        constants[22].i = 0;
+        constants[22].i = vector_config->useChroma;
         constants[23].i = 0;
         constants[24].f = vector_config->motionScaleX;
         constants[25].f = vector_config->motionScaleY;

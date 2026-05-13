@@ -18,7 +18,7 @@ mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, mv_export_backend="cpu")
 |---|---:|---|---|---|
 | `"cpu"` | Full dense flow | none | flow reduction, vector conversion, SAD, stats, blob packing | safest default |
 | `"gpu_flow_reduce"` | compact block flow | flow reduction only | vector conversion, SAD, stats, blob packing | recommended GPU-assisted mode |
-| `"gpu_full"` | compact block vectors | flow reduction, vector conversion, clamping, raw luma SAD | `sad_multiplier`, stats, blob packing | experimental, narrower config support |
+| `"gpu_full"` | compact block vectors | flow reduction, vector conversion, clamping, raw SAD | `sad_multiplier`, stats, blob packing | experimental, narrower config support |
 
 For a 1920x1024 clip using the default 16x8 blocks and 8x4 overlap, the approximate readback sizes are:
 
@@ -97,7 +97,7 @@ The shader performs:
 - vector rounding
 - vector clamping
 - pixel displacement conversion
-- raw luma SAD
+- raw SAD (`chroma=0`: luma SAD, `chroma=1`: RGB SAD)
 
 The CPU still performs:
 
@@ -110,7 +110,6 @@ The shader outputs compact vectors instead of final MVTools blobs. That keeps th
 
 Current limitations:
 
-- `chroma=0` only.
 - `res_scale=1.0` only, because the shader currently computes SAD from the same RGBS frames uploaded for RIFE inference.
 - Source dimensions must match inference dimensions.
 - Raw SAD must fit in 32-bit storage before `sad_multiplier` is applied.
@@ -125,7 +124,7 @@ Expected effects:
 
 Parity notes:
 
-`gpu_full` is more likely to differ from `"cpu"` than `gpu_flow_reduce` because vector rounding, clamping, luma conversion, and raw SAD are all performed in shader code. The intended behavior matches the CPU path, but small differences are possible near rounding boundaries or SAD quantization boundaries.
+`gpu_full` is more likely to differ from `"cpu"` than `gpu_flow_reduce` because vector rounding, clamping, sample quantization, and raw SAD are all performed in shader code. The intended behavior matches the CPU path, but small differences are possible near rounding boundaries or SAD quantization boundaries.
 
 Use this mode as an explicit experimental backend until it has been validated on the specific settings you care about.
 

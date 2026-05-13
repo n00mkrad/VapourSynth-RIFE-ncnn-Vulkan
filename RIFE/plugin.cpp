@@ -1261,15 +1261,13 @@ static void validateAbsSADClipRange(const int absSadClipRange) {
 }
 
 static void validateGpuFullMotionVectorBackend(const MotionVectorConfig& config) {
-    if (config.useChroma)
-        throw "mv_export_backend=gpu_full currently supports chroma=false only";
-
     if (config.inferenceWidth != config.backwardAnalysisData.nWidth ||
         config.inferenceHeight != config.backwardAnalysisData.nHeight)
         throw "mv_export_backend=gpu_full currently requires inference dimensions to match the source dimensions";
 
     const auto maxSample = (1ULL << config.bits) - 1ULL;
-    const auto maxRawSad = static_cast<unsigned long long>(config.blockSizeX) * config.blockSizeY * maxSample;
+    const auto chromaScale = config.useChroma ? 3ULL : 1ULL;
+    const auto maxRawSad = static_cast<unsigned long long>(config.blockSizeX) * config.blockSizeY * maxSample * chromaScale;
     if (maxRawSad > std::numeric_limits<uint32_t>::max())
         throw "mv_export_backend=gpu_full raw SAD exceeds 32-bit storage for this block size and bit depth";
 }
@@ -2105,6 +2103,7 @@ static RIFEGpuMotionVectorConfig createRIFEGpuMotionVectorConfig(const MotionVec
     vectorConfig.pel = config.pel;
     vectorConfig.blockReduce = config.blockReduce;
     vectorConfig.bits = config.bits;
+    vectorConfig.useChroma = config.useChroma ? 1 : 0;
     vectorConfig.motionScaleX = config.motionScaleX;
     vectorConfig.motionScaleY = config.motionScaleY;
     return vectorConfig;

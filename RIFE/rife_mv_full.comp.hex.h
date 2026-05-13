@@ -38,7 +38,7 @@ int internal_pad_y;
 
 int pel;
 int reduce_mode;
-int reserved0;
+int use_chroma;
 int reserved1;
 
 float motion_scale_x;
@@ -67,6 +67,22 @@ float round_sample(float value)
 float scaled = value * p.max_sample;
 float rounded = scaled >= 0.f ? floor(scaled + 0.5f) : ceil(scaled - 0.5f);
 return rounded / p.max_sample;
+}
+
+vec3 load_current_rgb(int x, int y)
+{
+int idx = y * p.image_w + x;
+return vec3(round_sample(current_blob_data[idx]),
+round_sample(current_blob_data[p.image_cstep + idx]),
+round_sample(current_blob_data[p.image_cstep * 2 + idx]));
+}
+
+vec3 load_reference_rgb(int x, int y)
+{
+int idx = y * p.image_w + x;
+return vec3(round_sample(reference_blob_data[idx]),
+round_sample(reference_blob_data[p.image_cstep + idx]),
+round_sample(reference_blob_data[p.image_cstep * 2 + idx]));
 }
 
 vec4 load_flow(int x, int y)
@@ -105,24 +121,16 @@ int max_pixel_delta = size - block_size + padding - block_coord;
 return min(max(value, min_pixel_delta * p.pel), max_pixel_delta * p.pel);
 }
 
-float luma_from_rgb(float r, float g, float b)
-{
-r = round_sample(r);
-g = round_sample(g);
-b = round_sample(b);
-return r * 0.2126f + g * 0.7152f + b * 0.0722f;
-}
-
 float load_current_luma(int x, int y)
 {
-int idx = y * p.image_w + x;
-return luma_from_rgb(current_blob_data[idx], current_blob_data[p.image_cstep + idx], current_blob_data[p.image_cstep * 2 + idx]);
+vec3 rgb = load_current_rgb(x, y);
+return rgb.r * 0.2126f + rgb.g * 0.7152f + rgb.b * 0.0722f;
 }
 
 float load_reference_luma(int x, int y)
 {
-int idx = y * p.image_w + x;
-return luma_from_rgb(reference_blob_data[idx], reference_blob_data[p.image_cstep + idx], reference_blob_data[p.image_cstep * 2 + idx]);
+vec3 rgb = load_reference_rgb(x, y);
+return rgb.r * 0.2126f + rgb.g * 0.7152f + rgb.b * 0.0722f;
 }
 
 uint compute_sad(int pixel_dx, int pixel_dy, int block_x, int block_y)
@@ -141,6 +149,21 @@ reference_y0 + p.block_size_y <= p.image_h;
 
 if (interior)
 {
+if (p.use_chroma != 0)
+{
+for (int y = 0; y < p.block_size_y; y++)
+{
+for (int x = 0; x < p.block_size_x; x++)
+{
+vec3 current_rgb = load_current_rgb(current_x0 + x, current_y0 + y);
+vec3 reference_rgb = load_reference_rgb(reference_x0 + x, reference_y0 + y);
+vec3 diff = abs(current_rgb - reference_rgb);
+sad += round_positive((diff.r + diff.g + diff.b) * p.max_sample);
+}
+}
+}
+else
+{
 for (int y = 0; y < p.block_size_y; y++)
 {
 for (int x = 0; x < p.block_size_x; x++)
@@ -148,6 +171,7 @@ for (int x = 0; x < p.block_size_x; x++)
 float current_luma = load_current_luma(current_x0 + x, current_y0 + y);
 float reference_luma = load_reference_luma(reference_x0 + x, reference_y0 + y);
 sad += round_positive(abs(current_luma - reference_luma) * p.max_sample);
+}
 }
 }
 return sad;
@@ -161,9 +185,19 @@ for (int x = 0; x < p.block_size_x; x++)
 {
 int current_x = clampi(block_x + x, p.image_w);
 int reference_x = clampi(current_x + pixel_dx, p.image_w);
+if (p.use_chroma != 0)
+{
+vec3 current_rgb = load_current_rgb(current_x, current_y);
+vec3 reference_rgb = load_reference_rgb(reference_x, reference_y);
+vec3 diff = abs(current_rgb - reference_rgb);
+sad += round_positive((diff.r + diff.g + diff.b) * p.max_sample);
+}
+else
+{
 float current_luma = load_current_luma(current_x, current_y);
 float reference_luma = load_reference_luma(reference_x, reference_y);
 sad += round_positive(abs(current_luma - reference_luma) * p.max_sample);
+}
 }
 }
 
