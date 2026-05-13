@@ -830,6 +830,7 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
                                 float* flow_out, RIFEReducedFlowBlock* reduced_flow_out, const RIFEFlowReduceConfig* reduce_config,
                                 RIFEGpuMotionVector* vectors_out, const RIFEGpuMotionVectorConfig* vector_config,
                                 const int w, const int h, const ptrdiff_t stride,
+                                const ncnn::Mat* src0_packed, const ncnn::Mat* src1_packed,
                                 FlowPerfBreakdown* perf) const
 {
     const bool collect_perf = perf != nullptr;
@@ -862,35 +863,56 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
 
     ncnn::Mat in0;
     ncnn::Mat in1;
-    in0.create(w, h, channels, sizeof(float), 1);
-    in1.create(w, h, channels, sizeof(float), 1);
-    auto* in0_r = static_cast<float*>(in0.channel(0));
-    auto* in0_g = static_cast<float*>(in0.channel(1));
-    auto* in0_b = static_cast<float*>(in0.channel(2));
-    auto* in1_r = static_cast<float*>(in1.channel(0));
-    auto* in1_g = static_cast<float*>(in1.channel(1));
-    auto* in1_b = static_cast<float*>(in1.channel(2));
     if (collect_perf)
         perf->setupNs += monotonic_now_ns() - setup_start_ns;
 
     const auto cpu_prep_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    if (opt.use_int8_storage)
+    if (src0_packed && src1_packed)
     {
-        scale_plane_to_ncnn_input(src0R, stride, in0_r, w, h);
-        scale_plane_to_ncnn_input(src0G, stride, in0_g, w, h);
-        scale_plane_to_ncnn_input(src0B, stride, in0_b, w, h);
-        scale_plane_to_ncnn_input(src1R, stride, in1_r, w, h);
-        scale_plane_to_ncnn_input(src1G, stride, in1_g, w, h);
-        scale_plane_to_ncnn_input(src1B, stride, in1_b, w, h);
+        const auto packed_valid = [&](const ncnn::Mat& packed) {
+            return !packed.empty() &&
+                   packed.dims == 3 &&
+                   packed.w == w &&
+                   packed.h == h &&
+                   packed.c == channels &&
+                   packed.elempack == 1 &&
+                   packed.elemsize == sizeof(float);
+        };
+        if (!packed_valid(*src0_packed) || !packed_valid(*src1_packed))
+            return finish(-1);
+        if (opt.use_int8_storage)
+            return finish(-1);
+        in0 = *src0_packed;
+        in1 = *src1_packed;
     }
     else
     {
-        copy_plane_to_ncnn_input(src0R, stride, in0_r, w, h);
-        copy_plane_to_ncnn_input(src0G, stride, in0_g, w, h);
-        copy_plane_to_ncnn_input(src0B, stride, in0_b, w, h);
-        copy_plane_to_ncnn_input(src1R, stride, in1_r, w, h);
-        copy_plane_to_ncnn_input(src1G, stride, in1_g, w, h);
-        copy_plane_to_ncnn_input(src1B, stride, in1_b, w, h);
+        in0.create(w, h, channels, sizeof(float), 1);
+        in1.create(w, h, channels, sizeof(float), 1);
+        auto* in0_r = static_cast<float*>(in0.channel(0));
+        auto* in0_g = static_cast<float*>(in0.channel(1));
+        auto* in0_b = static_cast<float*>(in0.channel(2));
+        auto* in1_r = static_cast<float*>(in1.channel(0));
+        auto* in1_g = static_cast<float*>(in1.channel(1));
+        auto* in1_b = static_cast<float*>(in1.channel(2));
+        if (opt.use_int8_storage)
+        {
+            scale_plane_to_ncnn_input(src0R, stride, in0_r, w, h);
+            scale_plane_to_ncnn_input(src0G, stride, in0_g, w, h);
+            scale_plane_to_ncnn_input(src0B, stride, in0_b, w, h);
+            scale_plane_to_ncnn_input(src1R, stride, in1_r, w, h);
+            scale_plane_to_ncnn_input(src1G, stride, in1_g, w, h);
+            scale_plane_to_ncnn_input(src1B, stride, in1_b, w, h);
+        }
+        else
+        {
+            copy_plane_to_ncnn_input(src0R, stride, in0_r, w, h);
+            copy_plane_to_ncnn_input(src0G, stride, in0_g, w, h);
+            copy_plane_to_ncnn_input(src0B, stride, in0_b, w, h);
+            copy_plane_to_ncnn_input(src1R, stride, in1_r, w, h);
+            copy_plane_to_ncnn_input(src1G, stride, in1_g, w, h);
+            copy_plane_to_ncnn_input(src1B, stride, in1_b, w, h);
+        }
     }
     if (collect_perf)
         perf->cpuPrepNs += monotonic_now_ns() - cpu_prep_start_ns;
@@ -1229,7 +1251,17 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
                        float* flow_out, const int w, const int h, const ptrdiff_t stride,
                        FlowPerfBreakdown* perf) const
 {
-    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, flow_out, nullptr, nullptr, nullptr, nullptr, w, h, stride, perf);
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
+                                 flow_out, nullptr, nullptr, nullptr, nullptr,
+                                 w, h, stride, nullptr, nullptr, perf);
+}
+
+int RIFE::process_flow(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packed,
+                       float* flow_out, FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                 flow_out, nullptr, nullptr, nullptr, nullptr,
+                                 src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
 }
 
 int RIFE::process_flow_reduced(const float* src0R, const float* src0G, const float* src0B,
@@ -1238,7 +1270,18 @@ int RIFE::process_flow_reduced(const float* src0R, const float* src0G, const flo
                                const int w, const int h, const ptrdiff_t stride,
                                FlowPerfBreakdown* perf) const
 {
-    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr, w, h, stride, perf);
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
+                                 nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr,
+                                 w, h, stride, nullptr, nullptr, perf);
+}
+
+int RIFE::process_flow_reduced(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packed,
+                               RIFEReducedFlowBlock* reduced_flow_out, const RIFEFlowReduceConfig& reduce_config,
+                               FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr,
+                                 src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
 }
 
 int RIFE::process_motion_vectors_gpu(const float* src0R, const float* src0G, const float* src0B,
@@ -1247,5 +1290,16 @@ int RIFE::process_motion_vectors_gpu(const float* src0R, const float* src0G, con
                                      const int w, const int h, const ptrdiff_t stride,
                                      FlowPerfBreakdown* perf) const
 {
-    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B, nullptr, nullptr, nullptr, vectors_out, &vector_config, w, h, stride, perf);
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
+                                 nullptr, nullptr, nullptr, vectors_out, &vector_config,
+                                 w, h, stride, nullptr, nullptr, perf);
+}
+
+int RIFE::process_motion_vectors_gpu(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packed,
+                                     RIFEGpuMotionVector* vectors_out, const RIFEGpuMotionVectorConfig& vector_config,
+                                     FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr, nullptr, nullptr, vectors_out, &vector_config,
+                                 src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
 }

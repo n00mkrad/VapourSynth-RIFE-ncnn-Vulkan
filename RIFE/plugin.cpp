@@ -59,6 +59,10 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> flowExportResizeNs{ 0 };
     std::atomic<int64_t> flowCleanupNs{ 0 };
     std::atomic<int64_t> flowReadbackBytes{ 0 };
+    std::atomic<int64_t> packedCacheHitCount{ 0 };
+    std::atomic<int64_t> packedCacheMissCount{ 0 };
+    std::atomic<int64_t> packedBuildNs{ 0 };
+    std::atomic<int64_t> packedWaitNs{ 0 };
     std::atomic<int64_t> lumaBuildNs{ 0 };
     std::atomic<int64_t> vectorPackNs{ 0 };
     std::atomic<int64_t> renderSadMaskNs{ 0 };
@@ -78,6 +82,22 @@ struct MotionVectorLumaCache final {
     std::mutex mutex;
     std::condition_variable condition;
     std::unordered_map<int, MotionVectorLumaCacheEntry> entries;
+    std::deque<int> lru;
+    size_t maxEntries;
+};
+
+struct MotionVectorPackedCacheEntry final {
+    int frameNumber;
+    int width;
+    int height;
+    bool building;
+    std::shared_ptr<const ncnn::Mat> packed;
+};
+
+struct MotionVectorPackedCache final {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::unordered_map<int, MotionVectorPackedCacheEntry> entries;
     std::deque<int> lru;
     size_t maxEntries;
 };
@@ -108,6 +128,36 @@ struct SharedMotionVectorLumaCacheKeyHash final {
         hash ^= std::hash<int>{}(key.width) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<int>{}(key.height) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<int>{}(key.bits) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<bool>{}(key.convertedFromYUV) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<std::string>{}(key.matrixIn) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<std::string>{}(key.rangeIn) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        return hash;
+    }
+};
+
+struct SharedMotionVectorPackedCacheKey final {
+    uintptr_t sourceIdentity;
+    int inferenceWidth;
+    int inferenceHeight;
+    bool convertedFromYUV;
+    std::string matrixIn;
+    std::string rangeIn;
+
+    bool operator==(const SharedMotionVectorPackedCacheKey& other) const noexcept {
+        return sourceIdentity == other.sourceIdentity &&
+               inferenceWidth == other.inferenceWidth &&
+               inferenceHeight == other.inferenceHeight &&
+               convertedFromYUV == other.convertedFromYUV &&
+               matrixIn == other.matrixIn &&
+               rangeIn == other.rangeIn;
+    }
+};
+
+struct SharedMotionVectorPackedCacheKeyHash final {
+    size_t operator()(const SharedMotionVectorPackedCacheKey& key) const noexcept {
+        size_t hash = std::hash<uintptr_t>{}(key.sourceIdentity);
+        hash ^= std::hash<int>{}(key.inferenceWidth) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        hash ^= std::hash<int>{}(key.inferenceHeight) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<bool>{}(key.convertedFromYUV) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<std::string>{}(key.matrixIn) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<std::string>{}(key.rangeIn) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
@@ -410,6 +460,10 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto flowExportResizeNs = stats.flowExportResizeNs.load(std::memory_order_relaxed);
     const auto flowCleanupNs = stats.flowCleanupNs.load(std::memory_order_relaxed);
     const auto flowReadbackBytes = stats.flowReadbackBytes.load(std::memory_order_relaxed);
+    const auto packedCacheHitCount = stats.packedCacheHitCount.load(std::memory_order_relaxed);
+    const auto packedCacheMissCount = stats.packedCacheMissCount.load(std::memory_order_relaxed);
+    const auto packedBuildNs = stats.packedBuildNs.load(std::memory_order_relaxed);
+    const auto packedWaitNs = stats.packedWaitNs.load(std::memory_order_relaxed);
     const auto lumaBuildNs = stats.lumaBuildNs.load(std::memory_order_relaxed);
     const auto vectorPackNs = stats.vectorPackNs.load(std::memory_order_relaxed);
     const auto renderSadMaskNs = stats.renderSadMaskNs.load(std::memory_order_relaxed);
@@ -469,6 +523,10 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     std::cerr << "  semaphore_wait_ms=" << nsToMs(semaphoreWaitNs)
               << " local_wait_ms=" << nsToMs(localSemaphoreWaitNs)
               << " shared_wait_ms=" << nsToMs(sharedSemaphoreWaitNs)
+              << " packed_cache_hits=" << packedCacheHitCount
+              << " packed_cache_misses=" << packedCacheMissCount
+              << " packed_build_ms=" << nsToMs(packedBuildNs)
+              << " packed_wait_ms=" << nsToMs(packedWaitNs)
               << " luma_build_ms=" << nsToMs(lumaBuildNs)
               << " vector_pack_ms=" << nsToMs(vectorPackNs)
               << " render_sad_mask_ms=" << nsToMs(renderSadMaskNs)
@@ -521,6 +579,7 @@ static MotionVectorExportBackend parseMotionVectorExportBackend(const int value)
 static void printMotionVectorInvocation(const char* const functionName, const int gpuId, const int gpuThread,
                                         const int sharedFlowInFlight, const bool sharedLumaCache, const float flowScale,
                                         const FlowResizeMode flowResizeMode, const MotionVectorExportBackend mvExportBackend,
+                                        const bool sharedPackedCache, const int packedCacheMiB,
                                         const bool perfStats,
                                         const MotionVectorConfig& config, const float resScale,
                                         const int inferenceWidth, const int inferenceHeight,
@@ -533,6 +592,8 @@ static void printMotionVectorInvocation(const char* const functionName, const in
             << " gpu_thread=" << gpuThread
             << " shared_flow_inflight=" << sharedFlowInFlight
             << " shared_luma_cache=" << sharedLumaCache
+            << " shared_packed_cache=" << sharedPackedCache
+            << " packed_cache_mib=" << packedCacheMiB
             << " flow_scale=" << flowScale
             << " res_scale=" << resScale
             << " cpu_flow_resize=" << flowResizeModeName(flowResizeMode)
@@ -849,6 +910,163 @@ static std::shared_ptr<MotionVectorLumaCache> acquireSharedLumaCache(const Share
     return created;
 }
 
+static size_t computePackedFrameBytes(const int width, const int height) {
+    const auto planeBytes = static_cast<size_t>(width) * height * sizeof(float);
+    const auto alignedPlaneBytes = (planeBytes + 15u) & ~static_cast<size_t>(15u);
+    return alignedPlaneBytes * 3u;
+}
+
+static size_t computePackedCacheMaxEntries(const int width, const int height, const int packedCacheMiB) {
+    constexpr size_t minEntries = 2;
+    constexpr size_t maxEntries = 4096;
+    const auto frameBytes = computePackedFrameBytes(width, height);
+    const auto budgetBytes = static_cast<size_t>(packedCacheMiB) * 1024u * 1024u;
+    if (frameBytes == 0)
+        return minEntries;
+
+    const auto entries = std::max(minEntries, budgetBytes / frameBytes);
+    return std::min(entries, maxEntries);
+}
+
+static std::shared_ptr<MotionVectorPackedCache> createMotionVectorPackedCache(const size_t maxEntries) {
+    auto cache = std::make_shared<MotionVectorPackedCache>();
+    cache->maxEntries = maxEntries;
+    return cache;
+}
+
+static std::shared_ptr<MotionVectorPackedCache> acquireSharedPackedCache(const SharedMotionVectorPackedCacheKey& key,
+                                                                         const size_t maxEntries) {
+    static std::mutex mutex;
+    static std::unordered_map<SharedMotionVectorPackedCacheKey,
+                              std::weak_ptr<MotionVectorPackedCache>,
+                              SharedMotionVectorPackedCacheKeyHash> caches;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = caches.find(key);
+    if (it != caches.end()) {
+        if (auto existing = it->second.lock())
+            return existing;
+    }
+
+    auto created = createMotionVectorPackedCache(maxEntries);
+    caches[key] = created;
+    return created;
+}
+
+static void touchMotionVectorPackedCacheEntry(const std::shared_ptr<MotionVectorPackedCache>& cache,
+                                              const int frameNumber) {
+    for (auto it = cache->lru.begin(); it != cache->lru.end(); ++it) {
+        if (*it != frameNumber)
+            continue;
+
+        cache->lru.erase(it);
+        break;
+    }
+
+    cache->lru.push_back(frameNumber);
+}
+
+static void pruneMotionVectorPackedCache(const std::shared_ptr<MotionVectorPackedCache>& cache) {
+    while (cache->entries.size() > cache->maxEntries && !cache->lru.empty()) {
+        const auto frameNumber = cache->lru.front();
+        cache->lru.pop_front();
+        const auto it = cache->entries.find(frameNumber);
+        if (it == cache->entries.end())
+            continue;
+
+        if (it->second.building) {
+            cache->lru.push_back(frameNumber);
+            break;
+        }
+
+        cache->entries.erase(it);
+    }
+}
+
+static void buildPackedInferenceFrame(const VSFrame* frame, const int width, const int height,
+                                      const VSAPI* vsapi, ncnn::Mat& packed) noexcept {
+    packed.create(width, height, 3, sizeof(float), 1);
+    for (auto plane = 0; plane < 3; plane++) {
+        const auto stride = static_cast<int>(vsapi->getStride(frame, plane) / vsapi->getVideoFrameFormat(frame)->bytesPerSample);
+        const auto* src = reinterpret_cast<const float*>(vsapi->getReadPtr(frame, plane));
+        auto planeMat = packed.channel(plane);
+        auto* dst = static_cast<float*>(planeMat);
+        if (stride == width) {
+            std::memcpy(dst, src, static_cast<size_t>(width) * height * sizeof(float));
+            continue;
+        }
+
+        for (auto y = 0; y < height; y++) {
+            const auto offset = static_cast<size_t>(y) * width;
+            std::memcpy(dst + offset, src + static_cast<size_t>(y) * stride, static_cast<size_t>(width) * sizeof(float));
+        }
+    }
+}
+
+static std::shared_ptr<const ncnn::Mat> getOrCreatePackedInferenceFrame(const std::shared_ptr<MotionVectorPackedCache>& cache,
+                                                                         const VSFrame* frame, const int frameNumber,
+                                                                         const int width, const int height,
+                                                                         MotionVectorPerfStats* const perf,
+                                                                         const VSAPI* vsapi) {
+    if (!cache) {
+        auto packed = std::make_shared<ncnn::Mat>();
+        buildPackedInferenceFrame(frame, width, height, vsapi, *packed);
+        return packed;
+    }
+
+    while (true) {
+        std::unique_lock<std::mutex> lock(cache->mutex);
+        auto& entry = cache->entries[frameNumber];
+
+        if (entry.packed && !entry.building && entry.width == width && entry.height == height) {
+            auto packed = entry.packed;
+            touchMotionVectorPackedCacheEntry(cache, frameNumber);
+            if (perf)
+                accumulatePerfStat(perf->packedCacheHitCount, 1);
+            return packed;
+        }
+
+        if (entry.building) {
+            const auto waitStartNs = perf ? monotonicNowNs() : 0;
+            cache->condition.wait(lock, [&]() {
+                const auto it = cache->entries.find(frameNumber);
+                return it == cache->entries.end() || !it->second.building;
+            });
+            if (perf)
+                accumulatePerfStat(perf->packedWaitNs, monotonicNowNs() - waitStartNs);
+            continue;
+        }
+
+        entry.frameNumber = frameNumber;
+        entry.width = width;
+        entry.height = height;
+        entry.building = true;
+        entry.packed.reset();
+        if (perf)
+            accumulatePerfStat(perf->packedCacheMissCount, 1);
+        lock.unlock();
+
+        auto packed = std::make_shared<ncnn::Mat>();
+        const auto buildStartNs = perf ? monotonicNowNs() : 0;
+        buildPackedInferenceFrame(frame, width, height, vsapi, *packed);
+        if (perf)
+            accumulatePerfStat(perf->packedBuildNs, monotonicNowNs() - buildStartNs);
+
+        lock.lock();
+        auto& stored = cache->entries[frameNumber];
+        stored.frameNumber = frameNumber;
+        stored.width = width;
+        stored.height = height;
+        stored.building = false;
+        stored.packed = packed;
+        touchMotionVectorPackedCacheEntry(cache, frameNumber);
+        pruneMotionVectorPackedCache(cache);
+        lock.unlock();
+        cache->condition.notify_all();
+        return packed;
+    }
+}
+
 static int processFlowWithSemaphores(const RIFE* const rife,
                                      std::counting_semaphore<>* const localSemaphore,
                                      std::counting_semaphore<>* const sharedSemaphore,
@@ -889,6 +1107,54 @@ static int processFlowWithSemaphores(const RIFE* const rife,
 
     const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
     const auto status = rife->process_flow(src0R, src0G, src0B, src1R, src1G, src1B, flowOut, width, height, stride, flowPerf);
+    if (rifeProcessWallNs)
+        *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
+
+    if (sharedSemaphore)
+        sharedSemaphore->release();
+    localSemaphore->release();
+    return status;
+}
+
+static int processFlowWithSemaphores(const RIFE* const rife,
+                                     std::counting_semaphore<>* const localSemaphore,
+                                     std::counting_semaphore<>* const sharedSemaphore,
+                                     const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                     float* flowOut,
+                                     int64_t* waitNs = nullptr,
+                                     int64_t* localWaitNs = nullptr,
+                                     int64_t* sharedWaitNs = nullptr,
+                                     int64_t* rifeProcessWallNs = nullptr,
+                                     FlowPerfBreakdown* flowPerf = nullptr) noexcept {
+    int64_t localWait{};
+    int64_t sharedWait{};
+    if (localWaitNs || waitNs) {
+        const auto localWaitStartNs = monotonicNowNs();
+        localSemaphore->acquire();
+        localWait = monotonicNowNs() - localWaitStartNs;
+    } else {
+        localSemaphore->acquire();
+    }
+
+    if (sharedSemaphore) {
+        if (sharedWaitNs || waitNs) {
+            const auto sharedWaitStartNs = monotonicNowNs();
+            sharedSemaphore->acquire();
+            sharedWait = monotonicNowNs() - sharedWaitStartNs;
+        } else {
+            sharedSemaphore->acquire();
+        }
+    }
+
+    if (localWaitNs)
+        *localWaitNs = localWait;
+    if (sharedWaitNs)
+        *sharedWaitNs = sharedWait;
+    if (waitNs)
+        *waitNs = localWait + sharedWait;
+
+    const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
+    const auto status = rife->process_flow(src0Packed, src1Packed, flowOut, flowPerf);
     if (rifeProcessWallNs)
         *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
 
@@ -949,6 +1215,54 @@ static int processReducedFlowWithSemaphores(const RIFE* const rife,
     return status;
 }
 
+static int processReducedFlowWithSemaphores(const RIFE* const rife,
+                                            std::counting_semaphore<>* const localSemaphore,
+                                            std::counting_semaphore<>* const sharedSemaphore,
+                                            const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                            RIFEReducedFlowBlock* reducedFlowOut, const RIFEFlowReduceConfig& reduceConfig,
+                                            int64_t* waitNs = nullptr,
+                                            int64_t* localWaitNs = nullptr,
+                                            int64_t* sharedWaitNs = nullptr,
+                                            int64_t* rifeProcessWallNs = nullptr,
+                                            FlowPerfBreakdown* flowPerf = nullptr) noexcept {
+    int64_t localWait{};
+    int64_t sharedWait{};
+    if (localWaitNs || waitNs) {
+        const auto localWaitStartNs = monotonicNowNs();
+        localSemaphore->acquire();
+        localWait = monotonicNowNs() - localWaitStartNs;
+    } else {
+        localSemaphore->acquire();
+    }
+
+    if (sharedSemaphore) {
+        if (sharedWaitNs || waitNs) {
+            const auto sharedWaitStartNs = monotonicNowNs();
+            sharedSemaphore->acquire();
+            sharedWait = monotonicNowNs() - sharedWaitStartNs;
+        } else {
+            sharedSemaphore->acquire();
+        }
+    }
+
+    if (localWaitNs)
+        *localWaitNs = localWait;
+    if (sharedWaitNs)
+        *sharedWaitNs = sharedWait;
+    if (waitNs)
+        *waitNs = localWait + sharedWait;
+
+    const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
+    const auto status = rife->process_flow_reduced(src0Packed, src1Packed, reducedFlowOut, reduceConfig, flowPerf);
+    if (rifeProcessWallNs)
+        *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
+
+    if (sharedSemaphore)
+        sharedSemaphore->release();
+    localSemaphore->release();
+    return status;
+}
+
 static int processGpuMotionVectorsWithSemaphores(const RIFE* const rife,
                                                  std::counting_semaphore<>* const localSemaphore,
                                                  std::counting_semaphore<>* const sharedSemaphore,
@@ -991,6 +1305,54 @@ static int processGpuMotionVectorsWithSemaphores(const RIFE* const rife,
     const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
     const auto status = rife->process_motion_vectors_gpu(src0R, src0G, src0B, src1R, src1G, src1B,
                                                          vectorsOut, vectorConfig, width, height, stride, flowPerf);
+    if (rifeProcessWallNs)
+        *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
+
+    if (sharedSemaphore)
+        sharedSemaphore->release();
+    localSemaphore->release();
+    return status;
+}
+
+static int processGpuMotionVectorsWithSemaphores(const RIFE* const rife,
+                                                 std::counting_semaphore<>* const localSemaphore,
+                                                 std::counting_semaphore<>* const sharedSemaphore,
+                                                 const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                                 RIFEGpuMotionVector* vectorsOut, const RIFEGpuMotionVectorConfig& vectorConfig,
+                                                 int64_t* waitNs = nullptr,
+                                                 int64_t* localWaitNs = nullptr,
+                                                 int64_t* sharedWaitNs = nullptr,
+                                                 int64_t* rifeProcessWallNs = nullptr,
+                                                 FlowPerfBreakdown* flowPerf = nullptr) noexcept {
+    int64_t localWait{};
+    int64_t sharedWait{};
+    if (localWaitNs || waitNs) {
+        const auto localWaitStartNs = monotonicNowNs();
+        localSemaphore->acquire();
+        localWait = monotonicNowNs() - localWaitStartNs;
+    } else {
+        localSemaphore->acquire();
+    }
+
+    if (sharedSemaphore) {
+        if (sharedWaitNs || waitNs) {
+            const auto sharedWaitStartNs = monotonicNowNs();
+            sharedSemaphore->acquire();
+            sharedWait = monotonicNowNs() - sharedWaitStartNs;
+        } else {
+            sharedSemaphore->acquire();
+        }
+    }
+
+    if (localWaitNs)
+        *localWaitNs = localWait;
+    if (sharedWaitNs)
+        *sharedWaitNs = sharedWait;
+    if (waitNs)
+        *waitNs = localWait + sharedWait;
+
+    const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
+    const auto status = rife->process_motion_vectors_gpu(src0Packed, src1Packed, vectorsOut, vectorConfig, flowPerf);
     if (rifeProcessWallNs)
         *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
 
@@ -1526,6 +1888,7 @@ struct RIFEMVPairData final {
     std::unique_ptr<std::counting_semaphore<>> semaphore;
     std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
     std::shared_ptr<MotionVectorLumaCache> lumaCache;
+    std::shared_ptr<MotionVectorPackedCache> packedCache;
     MotionVectorExportBackend mvExportBackend{ MotionVectorExportBackend::Cpu };
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
@@ -1554,6 +1917,7 @@ struct RIFEMVApproxPairData final {
     std::unique_ptr<std::counting_semaphore<>> semaphore;
     std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
     std::shared_ptr<MotionVectorLumaCache> lumaCache;
+    std::shared_ptr<MotionVectorPackedCache> packedCache;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -2511,7 +2875,6 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
         if (reference) {
             const auto width = vsapi->getFrameWidth(current, 0);
             const auto height = vsapi->getFrameHeight(current, 0);
-            const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
             const auto useGpuFlowReduce = d->mvExportBackend == MotionVectorExportBackend::GpuFlowReduce;
             const auto useGpuFull = d->mvExportBackend == MotionVectorExportBackend::GpuFull;
             RIFEFlowReduceConfig reduceConfig{};
@@ -2530,12 +2893,10 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             std::shared_ptr<const std::vector<float>> referenceLumaPlane;
             const std::vector<float>* currentLumaCache = nullptr;
             const std::vector<float>* referenceLumaCache = nullptr;
-            const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
-            const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
-            const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
-            const auto referenceR = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 0));
-            const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
-            const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
+            const auto currentPacked = getOrCreatePackedInferenceFrame(d->packedCache, current, n, width, height,
+                                                                       d->perfStats ? d->perf.get() : nullptr, vsapi);
+            const auto referencePacked = getOrCreatePackedInferenceFrame(d->packedCache, reference, n + delta, width, height,
+                                                                         d->perfStats ? d->perf.get() : nullptr, vsapi);
 
             int64_t semaphoreWaitNs{};
             int64_t localSemaphoreWaitNs{};
@@ -2546,8 +2907,8 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             int status{};
             if (useGpuFlowReduce) {
                 status = processReducedFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
-                                                          currentR, currentG, currentB, referenceR, referenceG, referenceB,
-                                                          scratch.reducedFlow.data(), reduceConfig, width, height, stride,
+                                                          *currentPacked, *referencePacked,
+                                                          scratch.reducedFlow.data(), reduceConfig,
                                                           d->perfStats ? &semaphoreWaitNs : nullptr,
                                                           d->perfStats ? &localSemaphoreWaitNs : nullptr,
                                                           d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
@@ -2555,8 +2916,8 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                                           d->perfStats ? &flowPerf : nullptr);
             } else if (useGpuFull) {
                 status = processGpuMotionVectorsWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
-                                                               currentR, currentG, currentB, referenceR, referenceG, referenceB,
-                                                               scratch.gpuVectors.data(), gpuVectorConfig, width, height, stride,
+                                                               *currentPacked, *referencePacked,
+                                                               scratch.gpuVectors.data(), gpuVectorConfig,
                                                                d->perfStats ? &semaphoreWaitNs : nullptr,
                                                                d->perfStats ? &localSemaphoreWaitNs : nullptr,
                                                                d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
@@ -2564,8 +2925,8 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                                                d->perfStats ? &flowPerf : nullptr);
             } else {
                 status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
-                                                   currentR, currentG, currentB, referenceR, referenceG, referenceB,
-                                                   scratch.flow.data(), width, height, stride,
+                                                   *currentPacked, *referencePacked,
+                                                   scratch.flow.data(),
                                                    d->perfStats ? &semaphoreWaitNs : nullptr,
                                                    d->perfStats ? &localSemaphoreWaitNs : nullptr,
                                                    d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
@@ -2747,19 +3108,16 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
         if (reference) {
             const auto width = vsapi->getFrameWidth(current, 0);
             const auto height = vsapi->getFrameHeight(current, 0);
-            const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
             const auto flowSize = static_cast<size_t>(width) * height * 4;
             scratch.flow.resize(flowSize);
             std::shared_ptr<const std::vector<float>> currentLumaPlane;
             std::shared_ptr<const std::vector<float>> referenceLumaPlane;
             const std::vector<float>* currentLumaCache = nullptr;
             const std::vector<float>* referenceLumaCache = nullptr;
-            const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
-            const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
-            const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
-            const auto referenceR = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 0));
-            const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
-            const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
+            const auto currentPacked = getOrCreatePackedInferenceFrame(d->packedCache, current, n, width, height,
+                                                                       d->perfStats ? d->perf.get() : nullptr, vsapi);
+            const auto referencePacked = getOrCreatePackedInferenceFrame(d->packedCache, reference, n + 1, width, height,
+                                                                         d->perfStats ? d->perf.get() : nullptr, vsapi);
 
             int64_t semaphoreWaitNs{};
             int64_t localSemaphoreWaitNs{};
@@ -2768,8 +3126,8 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             FlowPerfBreakdown flowPerf{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
             const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
-                                                          currentR, currentG, currentB, referenceR, referenceG, referenceB,
-                                                          scratch.flow.data(), width, height, stride,
+                                                          *currentPacked, *referencePacked,
+                                                          scratch.flow.data(),
                                                           d->perfStats ? &semaphoreWaitNs : nullptr,
                                                           d->perfStats ? &localSemaphoreWaitNs : nullptr,
                                                           d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
@@ -3067,6 +3425,12 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         auto sharedLumaCacheEnabled = !!vsapi->mapGetInt(in, "shared_luma_cache", 0, &err);
         if (err)
             sharedLumaCacheEnabled = true;
+        auto sharedPackedCacheEnabled = !!vsapi->mapGetInt(in, "shared_packed_cache", 0, &err);
+        if (err)
+            sharedPackedCacheEnabled = true;
+        auto packedCacheMiB{ vsapi->mapGetIntSaturated(in, "packed_cache_mib", 0, &err) };
+        if (err)
+            packedCacheMiB = 256;
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
         if (err)
@@ -3198,6 +3562,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 
         if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
             throw "block_reduce must be 0 (center) or 1 (average)";
+        if (packedCacheMiB < 1)
+            throw "packed_cache_mib must be greater than 0";
 
         const auto inferenceWidth = computeInferenceDimension(sourceVi.width, resScale, "width");
         const auto inferenceHeight = computeInferenceDimension(sourceVi.height, resScale, "height");
@@ -3219,7 +3585,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (pairData->mvExportBackend == MotionVectorExportBackend::GpuFull)
             validateGpuFullMotionVectorBackend(pairData->mvConfig);
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
-                                    pairData->mvExportBackend, perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
+                                    pairData->mvExportBackend, sharedPackedCacheEnabled, packedCacheMiB, perfStats,
+                                    pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, true);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
@@ -3247,6 +3614,21 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             pairData->lumaCache = acquireSharedLumaCache(key, 16);
         } else {
             pairData->lumaCache = createMotionVectorLumaCache(4);
+        }
+        const auto packedCacheMaxEntries = computePackedCacheMaxEntries(clipSet.inferenceVi.width, clipSet.inferenceVi.height, packedCacheMiB);
+        if (sharedPackedCacheEnabled) {
+            SharedMotionVectorPackedCacheKey key{};
+            key.sourceIdentity = sharedLumaSourceIdentity;
+            key.inferenceWidth = clipSet.inferenceVi.width;
+            key.inferenceHeight = clipSet.inferenceVi.height;
+            key.convertedFromYUV = sourceConverted;
+            if (sourceConverted) {
+                key.matrixIn = matrixIn;
+                key.rangeIn = rangeIn;
+            }
+            pairData->packedCache = acquireSharedPackedCache(key, packedCacheMaxEntries);
+        } else {
+            pairData->packedCache = createMotionVectorPackedCache(packedCacheMaxEntries);
         }
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
@@ -3384,6 +3766,12 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         auto sharedLumaCacheEnabled = !!vsapi->mapGetInt(in, "shared_luma_cache", 0, &err);
         if (err)
             sharedLumaCacheEnabled = true;
+        auto sharedPackedCacheEnabled = !!vsapi->mapGetInt(in, "shared_packed_cache", 0, &err);
+        if (err)
+            sharedPackedCacheEnabled = true;
+        auto packedCacheMiB{ vsapi->mapGetIntSaturated(in, "packed_cache_mib", 0, &err) };
+        if (err)
+            packedCacheMiB = 256;
         const auto perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
 
         auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
@@ -3504,6 +3892,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
         if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
             throw "block_reduce must be 0 (center) or 1 (average)";
+        if (packedCacheMiB < 1)
+            throw "packed_cache_mib must be greater than 0";
 
         const auto inferenceWidth = computeInferenceDimension(sourceVi.width, resScale, "width");
         const auto inferenceHeight = computeInferenceDimension(sourceVi.height, resScale, "height");
@@ -3530,7 +3920,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
                                                             mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         }
         printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
-                                    MotionVectorExportBackend::Cpu, perfStats, pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
+                                    MotionVectorExportBackend::Cpu, sharedPackedCacheEnabled, packedCacheMiB, perfStats,
+                                    pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, false);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
@@ -3559,6 +3950,21 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
             pairData->lumaCache = acquireSharedLumaCache(key, 16);
         } else {
             pairData->lumaCache = createMotionVectorLumaCache(4);
+        }
+        const auto packedCacheMaxEntries = computePackedCacheMaxEntries(clipSet.inferenceVi.width, clipSet.inferenceVi.height, packedCacheMiB);
+        if (sharedPackedCacheEnabled) {
+            SharedMotionVectorPackedCacheKey key{};
+            key.sourceIdentity = sharedLumaSourceIdentity;
+            key.inferenceWidth = clipSet.inferenceVi.width;
+            key.inferenceHeight = clipSet.inferenceVi.height;
+            key.convertedFromYUV = sourceConverted;
+            if (sourceConverted) {
+                key.matrixIn = matrixIn;
+                key.rangeIn = rangeIn;
+            }
+            pairData->packedCache = acquireSharedPackedCache(key, packedCacheMaxEntries);
+        } else {
+            pairData->packedCache = createMotionVectorPackedCache(packedCacheMaxEntries);
         }
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
@@ -3688,6 +4094,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
                              "shared_luma_cache:int:opt;"
+                             "shared_packed_cache:int:opt;"
+                             "packed_cache_mib:int:opt;"
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
@@ -3720,6 +4128,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
                              "shared_luma_cache:int:opt;"
+                             "shared_packed_cache:int:opt;"
+                             "packed_cache_mib:int:opt;"
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"
@@ -3750,6 +4160,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
                              "shared_luma_cache:int:opt;"
+                             "shared_packed_cache:int:opt;"
+                             "packed_cache_mib:int:opt;"
                              "flow_scale:float:opt;"
                              "res_scale:float:opt;"
                              "cpu_flow_resize:int:opt;"

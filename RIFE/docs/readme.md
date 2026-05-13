@@ -91,6 +91,21 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   This is only relevant when `chroma=0`.
   Automatic sharing is additionally scoped by the source clip identity, `bits`, and, for YUV input, `matrix_in_s` and `range_in_s`.
 
+- `shared_packed_cache`
+  Controls whether prepacked inference RGB frames are shared across compatible filter instances.
+  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
+  Default: `True`.
+  `True` / `1` enables cross-instance sharing for the same logical source clip and inference setup.
+  `False` / `0` keeps packed-frame reuse local to the current filter instance only.
+  Automatic sharing is scoped by source clip identity, inference width and height, and, for YUV input, `matrix_in_s` and `range_in_s`.
+
+- `packed_cache_mib`
+  Memory budget (MiB) for packed inference-frame cache entries.
+  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
+  Default: `256`.
+  Must be greater than `0`.
+  This cache only targets CPU-side inference-input repacking overhead and does not change vector/SAD semantics.
+
 - `blksize_x`, `blksize_y`
   Exported MVTools block size on each axis.
   Default: `blksize_x=16`, `blksize_y=blksize_x`.
@@ -167,7 +182,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -195,6 +210,8 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - `flow_readback_mib` and `flow_readback_avg_mib` GPU-to-CPU readback size
 - `flow_reduce_record_ms` GPU command recording time for `gpu_flow_reduce`
 - `flow_vector_record_ms` GPU command recording time for `gpu_full`
+- `packed_cache_hits` and `packed_cache_misses` packed inference-frame cache reuse counters
+- `packed_build_ms` and `packed_wait_ms` packed-frame build and cache-contention wait time
 - `render_sad_mask_ms` time spent rasterizing the `Gray8` SAD carrier plane when `render_sad_mask=True`
 
 `sad_multiplier`:
