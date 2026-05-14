@@ -173,32 +173,12 @@ constexpr auto RIFEMVBackwardVectorsInternalKey = "_RMVBackwardVectors";
 constexpr auto RIFEMVForwardVectorsInternalKey = "_RMVForwardVectors";
 constexpr auto RIFEMVBackwardDisplacementInternalKey = "_RMVBackwardDisplacement";
 constexpr auto RIFEMVForwardDisplacementInternalKey = "_RMVForwardDisplacement";
-constexpr auto RIFEMVBackwardAvgSadRawInternalKey = "_RMVBackwardAvgSadRaw";
-constexpr auto RIFEMVForwardAvgSadRawInternalKey = "_RMVForwardAvgSadRaw";
 constexpr auto RIFEMVBackwardAvgSad8x8InternalKey = "_RMVBackwardAvgSad8x8";
 constexpr auto RIFEMVForwardAvgSad8x8InternalKey = "_RMVForwardAvgSad8x8";
-constexpr auto RIFEMVBackwardAvgSadHigh2PctInternalKey = "_RMVBackwardAvgSadHigh2Pct";
-constexpr auto RIFEMVForwardAvgSadHigh2PctInternalKey = "_RMVForwardAvgSadHigh2Pct";
-constexpr auto RIFEMVBackwardAvgSadHigh10PctInternalKey = "_RMVBackwardAvgSadHigh10Pct";
-constexpr auto RIFEMVForwardAvgSadHigh10PctInternalKey = "_RMVForwardAvgSadHigh10Pct";
-constexpr auto RIFEMVBackwardAvgSadHigh25PctInternalKey = "_RMVBackwardAvgSadHigh25Pct";
-constexpr auto RIFEMVForwardAvgSadHigh25PctInternalKey = "_RMVForwardAvgSadHigh25Pct";
-constexpr auto RIFEMVBackwardAvgSadHigh50PctInternalKey = "_RMVBackwardAvgSadHigh50Pct";
-constexpr auto RIFEMVForwardAvgSadHigh50PctInternalKey = "_RMVForwardAvgSadHigh50Pct";
-constexpr auto RIFEMVBackwardAvgSadHigh75PctInternalKey = "_RMVBackwardAvgSadHigh75Pct";
-constexpr auto RIFEMVForwardAvgSadHigh75PctInternalKey = "_RMVForwardAvgSadHigh75Pct";
-constexpr auto RIFEMVBackwardAvgSadLow2PctInternalKey = "_RMVBackwardAvgSadLow2Pct";
-constexpr auto RIFEMVForwardAvgSadLow2PctInternalKey = "_RMVForwardAvgSadLow2Pct";
-constexpr auto RIFEMVBackwardAvgSadLow10PctInternalKey = "_RMVBackwardAvgSadLow10Pct";
-constexpr auto RIFEMVForwardAvgSadLow10PctInternalKey = "_RMVForwardAvgSadLow10Pct";
-constexpr auto RIFEMVBackwardAvgSadLow25PctInternalKey = "_RMVBackwardAvgSadLow25Pct";
-constexpr auto RIFEMVForwardAvgSadLow25PctInternalKey = "_RMVForwardAvgSadLow25Pct";
 constexpr auto RIFEMVBackwardMaxSadInternalKey = "_RMVBackwardMaxSad";
 constexpr auto RIFEMVForwardMaxSadInternalKey = "_RMVForwardMaxSad";
 constexpr auto RIFEMVBackwardMinSadInternalKey = "_RMVBackwardMinSad";
 constexpr auto RIFEMVForwardMinSadInternalKey = "_RMVForwardMinSad";
-constexpr auto RIFEMVBackwardSadAvgDeviationInternalKey = "_RMVBackwardSadAvgDeviation";
-constexpr auto RIFEMVForwardSadAvgDeviationInternalKey = "_RMVForwardSadAvgDeviation";
 constexpr auto RIFEMVBackwardAvgAbsDxInternalKey = "_RMVBackwardAvgAbsDx";
 constexpr auto RIFEMVForwardAvgAbsDxInternalKey = "_RMVForwardAvgAbsDx";
 constexpr auto RIFEMVBackwardAvgAbsDyInternalKey = "_RMVBackwardAvgAbsDy";
@@ -208,18 +188,8 @@ constexpr auto RIFEMVForwardAvgAbsMotionInternalKey = "_RMVForwardAvgAbsMotion";
 constexpr auto RIFEMVBackwardPanAmountInternalKey = "_RMVBackwardPanAmount";
 constexpr auto RIFEMVForwardPanAmountInternalKey = "_RMVForwardPanAmount";
 constexpr auto RIFEMVAvgSadKey = "RMV_AvgSad";
-constexpr auto RIFEMVAvgSadNormKey = "RMV_AvgSadNorm";
-constexpr auto RIFEMVAvgSadHigh2PctKey = "RMV_AvgSadHigh2Pct";
-constexpr auto RIFEMVAvgSadHigh10PctKey = "RMV_AvgSadHigh10Pct";
-constexpr auto RIFEMVAvgSadHigh25PctKey = "RMV_AvgSadHigh25Pct";
-constexpr auto RIFEMVAvgSadHigh50PctKey = "RMV_AvgSadHigh50Pct";
-constexpr auto RIFEMVAvgSadHigh75PctKey = "RMV_AvgSadHigh75Pct";
-constexpr auto RIFEMVAvgSadLow2PctKey = "RMV_AvgSadLow2Pct";
-constexpr auto RIFEMVAvgSadLow10PctKey = "RMV_AvgSadLow10Pct";
-constexpr auto RIFEMVAvgSadLow25PctKey = "RMV_AvgSadLow25Pct";
 constexpr auto RIFEMVMaxSadKey = "RMV_MaxSad";
 constexpr auto RIFEMVMinSadKey = "RMV_MinSad";
-constexpr auto RIFEMVSadAvgDeviationKey = "RMV_SadAvgDeviation";
 constexpr auto RIFEMVAvgAbsDxKey = "RMV_AvgAbsDx";
 constexpr auto RIFEMVAvgAbsDyKey = "RMV_AvgAbsDy";
 constexpr auto RIFEMVAvgAbsMotionKey = "RMV_AvgAbsMotion";
@@ -276,19 +246,9 @@ struct MVAnalysisData final {
 };
 
 struct MotionVectorFrameStats final {
-    int64_t averageSadRaw;
     int64_t averageSad8x8;
-    int64_t averageSadHigh2Pct;
-    int64_t averageSadHigh10Pct;
-    int64_t averageSadHigh25Pct;
-    int64_t averageSadHigh50Pct;
-    int64_t averageSadHigh75Pct;
-    int64_t averageSadLow2Pct;
-    int64_t averageSadLow10Pct;
-    int64_t averageSadLow25Pct;
     int64_t maxSad8x8;
     int64_t minSad8x8;
-    int64_t sadAvgDeviation;
     double averageAbsDx;
     double averageAbsDy;
     double averageAbsMotion;
@@ -313,19 +273,9 @@ enum class MotionVectorExportBackend : uint8_t {
 };
 
 struct MotionVectorFrameStatsKeys final {
-    const char* averageSadRaw;
     const char* averageSad8x8;
-    const char* averageSadHigh2Pct;
-    const char* averageSadHigh10Pct;
-    const char* averageSadHigh25Pct;
-    const char* averageSadHigh50Pct;
-    const char* averageSadHigh75Pct;
-    const char* averageSadLow2Pct;
-    const char* averageSadLow10Pct;
-    const char* averageSadLow25Pct;
     const char* maxSad;
     const char* minSad;
-    const char* sadAvgDeviation;
     const char* averageAbsDx;
     const char* averageAbsDy;
     const char* averageAbsMotion;
@@ -422,13 +372,6 @@ static int64_t roundPositiveAverageToInt64(const int64_t sum, const int64_t coun
         return 0;
 
     return (sum + count / 2) / count;
-}
-
-static int64_t computePercentileSampleCount(const int64_t totalCount, const int64_t percent) noexcept {
-    if (totalCount <= 0)
-        return 0;
-
-    return std::max<int64_t>(1, (totalCount * percent + 99) / 100);
 }
 
 static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, const std::string& label) {
@@ -580,7 +523,7 @@ static void printMotionVectorInvocation(const char* const functionName, const in
                                         const int sharedFlowInFlight, const bool sharedLumaCache, const float flowScale,
                                         const FlowResizeMode flowResizeMode, const MotionVectorExportBackend mvExportBackend,
                                         const bool sharedPackedCache, const int packedCacheMiB,
-                                        const bool perfStats,
+                                        const bool sadStats, const bool motionStats, const bool perfStats,
                                         const MotionVectorConfig& config, const float resScale,
                                         const int inferenceWidth, const int inferenceHeight,
                                         const int absSadClipRange, const bool renderSadMask,
@@ -599,6 +542,8 @@ static void printMotionVectorInvocation(const char* const functionName, const in
             << " cpu_flow_resize=" << flowResizeModeName(flowResizeMode)
             << " gpu_mode=" << static_cast<int>(mvExportBackend)
             << " gpu_mode_name=" << motionVectorExportBackendName(mvExportBackend)
+            << " sad_stats=" << sadStats
+            << " motion_stats=" << motionStats
             << " perf_stats=" << perfStats
             << " blksize_x=" << config.blockSizeX
             << " blksize_y=" << config.blockSizeY
@@ -640,71 +585,53 @@ static int64_t normalizeMotionVectorSadTo8x8(const int64_t sad, const MVAnalysis
 }
 
 static MotionVectorFrameStats computeMotionVectorFrameStats(const std::vector<MVToolsVector>& vectors,
-                                                            const MVAnalysisData& analysisData) noexcept {
+                                                            const MVAnalysisData& analysisData,
+                                                            const bool includeSadStats,
+                                                            const bool includeMotionStats) noexcept {
     MotionVectorFrameStats stats{};
-    if (vectors.empty())
+    if (vectors.empty() || (!includeSadStats && !includeMotionStats))
         return stats;
 
-    int64_t sadRawSum{};
     int64_t sad8x8Sum{};
     int64_t absDxSum{};
     int64_t absDySum{};
     int64_t maxSad8x8{};
     int64_t minSad8x8{ std::numeric_limits<int64_t>::max() };
     double absMotionSum{};
-    std::vector<int64_t> normalizedSads;
     std::vector<int> signedDxs;
     std::vector<int> signedDys;
-    normalizedSads.reserve(vectors.size());
-    signedDxs.reserve(vectors.size());
-    signedDys.reserve(vectors.size());
+    if (includeMotionStats) {
+        signedDxs.reserve(vectors.size());
+        signedDys.reserve(vectors.size());
+    }
     for (const auto& vector : vectors) {
-        const auto sad8x8 = normalizeMotionVectorSadTo8x8(vector.sad, analysisData);
-        sadRawSum += vector.sad;
-        sad8x8Sum += sad8x8;
-        absDxSum += std::llabs(static_cast<int64_t>(vector.x));
-        absDySum += std::llabs(static_cast<int64_t>(vector.y));
-        absMotionSum += std::hypot(static_cast<double>(vector.x), static_cast<double>(vector.y));
-        maxSad8x8 = std::max(maxSad8x8, sad8x8);
-        minSad8x8 = std::min(minSad8x8, sad8x8);
-        normalizedSads.push_back(sad8x8);
-        signedDxs.push_back(vector.x);
-        signedDys.push_back(vector.y);
+        if (includeSadStats) {
+            const auto sad8x8 = normalizeMotionVectorSadTo8x8(vector.sad, analysisData);
+            sad8x8Sum += sad8x8;
+            maxSad8x8 = std::max(maxSad8x8, sad8x8);
+            minSad8x8 = std::min(minSad8x8, sad8x8);
+        }
+        if (includeMotionStats) {
+            absDxSum += std::llabs(static_cast<int64_t>(vector.x));
+            absDySum += std::llabs(static_cast<int64_t>(vector.y));
+            absMotionSum += std::hypot(static_cast<double>(vector.x), static_cast<double>(vector.y));
+            signedDxs.push_back(vector.x);
+            signedDys.push_back(vector.y);
+        }
     }
 
     const auto vectorCount = static_cast<int64_t>(vectors.size());
-    stats.averageSadRaw = roundPositiveAverageToInt64(sadRawSum, vectorCount);
-    stats.averageSad8x8 = roundPositiveAverageToInt64(sad8x8Sum, vectorCount);
+    if (includeSadStats) {
+        stats.averageSad8x8 = roundPositiveAverageToInt64(sad8x8Sum, vectorCount);
+        stats.maxSad8x8 = maxSad8x8;
+        stats.minSad8x8 = minSad8x8 == std::numeric_limits<int64_t>::max() ? 0 : minSad8x8;
+    }
+    if (!includeMotionStats)
+        return stats;
+
     stats.averageAbsDx = static_cast<double>(absDxSum) / static_cast<double>(vectorCount);
     stats.averageAbsDy = static_cast<double>(absDySum) / static_cast<double>(vectorCount);
     stats.averageAbsMotion = absMotionSum / static_cast<double>(vectorCount);
-
-    std::sort(normalizedSads.begin(), normalizedSads.end());
-    const auto computeAverage = [&](const bool highest, const int64_t percent) {
-        const auto sampleCount = computePercentileSampleCount(vectorCount, percent);
-        int64_t subsetSum{};
-        if (highest) {
-            for (auto i = vectorCount - sampleCount; i < vectorCount; i++)
-                subsetSum += normalizedSads[static_cast<size_t>(i)];
-        } else {
-            for (auto i = int64_t{}; i < sampleCount; i++)
-                subsetSum += normalizedSads[static_cast<size_t>(i)];
-        }
-
-        return roundPositiveAverageToInt64(subsetSum, sampleCount);
-    };
-
-    stats.averageSadHigh2Pct = computeAverage(true, 2);
-    stats.averageSadHigh10Pct = computeAverage(true, 10);
-    stats.averageSadHigh25Pct = computeAverage(true, 25);
-    stats.averageSadHigh50Pct = computeAverage(true, 50);
-    stats.averageSadHigh75Pct = computeAverage(true, 75);
-    stats.averageSadLow2Pct = computeAverage(false, 2);
-    stats.averageSadLow10Pct = computeAverage(false, 10);
-    stats.averageSadLow25Pct = computeAverage(false, 25);
-    stats.maxSad8x8 = maxSad8x8;
-    stats.minSad8x8 = minSad8x8 == std::numeric_limits<int64_t>::max() ? 0 : minSad8x8;
-    stats.sadAvgDeviation = std::llabs(maxSad8x8 - stats.averageSad8x8);
 
     const auto computeMedianComponent = [&](std::vector<int>& values) {
         const auto mid = values.begin() + static_cast<ptrdiff_t>(values.size() / 2);
@@ -726,44 +653,30 @@ static MotionVectorFrameStats computeMotionVectorFrameStats(const std::vector<MV
 
 static void setMotionVectorProperties(VSMap* props, const MVAnalysisData& analysisData,
                                       const char* vectorBlob, const int vectorBlobSize,
-                                      const MotionVectorFrameStats& stats, const VSAPI* vsapi) {
+                                      const MotionVectorFrameStats& stats,
+                                      const bool includeSadStats, const bool includeMotionStats,
+                                      const VSAPI* vsapi) {
     vsapi->mapSetData(props, MVToolsAnalysisDataKey, reinterpret_cast<const char*>(&analysisData), sizeof(analysisData), dtBinary, maReplace);
     vsapi->mapSetData(props, MVToolsVectorsKey, vectorBlob, vectorBlobSize, dtBinary, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadKey, stats.averageSad8x8, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadNormKey, stats.averageSadRaw, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadHigh2PctKey, stats.averageSadHigh2Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadHigh10PctKey, stats.averageSadHigh10Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadHigh25PctKey, stats.averageSadHigh25Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadHigh50PctKey, stats.averageSadHigh50Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadHigh75PctKey, stats.averageSadHigh75Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadLow2PctKey, stats.averageSadLow2Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadLow10PctKey, stats.averageSadLow10Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVAvgSadLow25PctKey, stats.averageSadLow25Pct, maReplace);
-    vsapi->mapSetInt(props, RIFEMVMaxSadKey, stats.maxSad8x8, maReplace);
-    vsapi->mapSetInt(props, RIFEMVMinSadKey, stats.minSad8x8, maReplace);
-    vsapi->mapSetInt(props, RIFEMVSadAvgDeviationKey, stats.sadAvgDeviation, maReplace);
-    vsapi->mapSetFloat(props, RIFEMVAvgAbsDxKey, stats.averageAbsDx, maReplace);
-    vsapi->mapSetFloat(props, RIFEMVAvgAbsDyKey, stats.averageAbsDy, maReplace);
-    vsapi->mapSetFloat(props, RIFEMVAvgAbsMotionKey, stats.averageAbsMotion, maReplace);
-    vsapi->mapSetFloat(props, RIFEMVPanAmountKey, stats.panAmount, maReplace);
+    if (includeSadStats) {
+        vsapi->mapSetInt(props, RIFEMVAvgSadKey, stats.averageSad8x8, maReplace);
+        vsapi->mapSetInt(props, RIFEMVMaxSadKey, stats.maxSad8x8, maReplace);
+        vsapi->mapSetInt(props, RIFEMVMinSadKey, stats.minSad8x8, maReplace);
+    }
+    if (includeMotionStats) {
+        vsapi->mapSetFloat(props, RIFEMVAvgAbsDxKey, stats.averageAbsDx, maReplace);
+        vsapi->mapSetFloat(props, RIFEMVAvgAbsDyKey, stats.averageAbsDy, maReplace);
+        vsapi->mapSetFloat(props, RIFEMVAvgAbsMotionKey, stats.averageAbsMotion, maReplace);
+        vsapi->mapSetFloat(props, RIFEMVPanAmountKey, stats.panAmount, maReplace);
+    }
 }
 
 static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bool backward) noexcept {
     if (backward) {
         return MotionVectorFrameStatsKeys{
-            RIFEMVBackwardAvgSadRawInternalKey,
             RIFEMVBackwardAvgSad8x8InternalKey,
-            RIFEMVBackwardAvgSadHigh2PctInternalKey,
-            RIFEMVBackwardAvgSadHigh10PctInternalKey,
-            RIFEMVBackwardAvgSadHigh25PctInternalKey,
-            RIFEMVBackwardAvgSadHigh50PctInternalKey,
-            RIFEMVBackwardAvgSadHigh75PctInternalKey,
-            RIFEMVBackwardAvgSadLow2PctInternalKey,
-            RIFEMVBackwardAvgSadLow10PctInternalKey,
-            RIFEMVBackwardAvgSadLow25PctInternalKey,
             RIFEMVBackwardMaxSadInternalKey,
             RIFEMVBackwardMinSadInternalKey,
-            RIFEMVBackwardSadAvgDeviationInternalKey,
             RIFEMVBackwardAvgAbsDxInternalKey,
             RIFEMVBackwardAvgAbsDyInternalKey,
             RIFEMVBackwardAvgAbsMotionInternalKey,
@@ -772,19 +685,9 @@ static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bo
     }
 
     return MotionVectorFrameStatsKeys{
-        RIFEMVForwardAvgSadRawInternalKey,
         RIFEMVForwardAvgSad8x8InternalKey,
-        RIFEMVForwardAvgSadHigh2PctInternalKey,
-        RIFEMVForwardAvgSadHigh10PctInternalKey,
-        RIFEMVForwardAvgSadHigh25PctInternalKey,
-        RIFEMVForwardAvgSadHigh50PctInternalKey,
-        RIFEMVForwardAvgSadHigh75PctInternalKey,
-        RIFEMVForwardAvgSadLow2PctInternalKey,
-        RIFEMVForwardAvgSadLow10PctInternalKey,
-        RIFEMVForwardAvgSadLow25PctInternalKey,
         RIFEMVForwardMaxSadInternalKey,
         RIFEMVForwardMinSadInternalKey,
-        RIFEMVForwardSadAvgDeviationInternalKey,
         RIFEMVForwardAvgAbsDxInternalKey,
         RIFEMVForwardAvgAbsDyInternalKey,
         RIFEMVForwardAvgAbsMotionInternalKey,
@@ -793,67 +696,47 @@ static MotionVectorFrameStatsKeys getMotionVectorInternalFrameStatsKeys(const bo
 }
 
 static void setMotionVectorInternalFrameStats(VSMap* props, const MotionVectorFrameStats& stats,
+                                              const bool includeSadStats, const bool includeMotionStats,
                                               const bool backward, const VSAPI* vsapi) {
     const auto keys = getMotionVectorInternalFrameStatsKeys(backward);
-    vsapi->mapSetInt(props, keys.averageSadRaw, stats.averageSadRaw, maReplace);
-    vsapi->mapSetInt(props, keys.averageSad8x8, stats.averageSad8x8, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadHigh2Pct, stats.averageSadHigh2Pct, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadHigh10Pct, stats.averageSadHigh10Pct, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadHigh25Pct, stats.averageSadHigh25Pct, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadHigh50Pct, stats.averageSadHigh50Pct, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadHigh75Pct, stats.averageSadHigh75Pct, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadLow2Pct, stats.averageSadLow2Pct, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadLow10Pct, stats.averageSadLow10Pct, maReplace);
-    vsapi->mapSetInt(props, keys.averageSadLow25Pct, stats.averageSadLow25Pct, maReplace);
-    vsapi->mapSetInt(props, keys.maxSad, stats.maxSad8x8, maReplace);
-    vsapi->mapSetInt(props, keys.minSad, stats.minSad8x8, maReplace);
-    vsapi->mapSetInt(props, keys.sadAvgDeviation, stats.sadAvgDeviation, maReplace);
-    vsapi->mapSetFloat(props, keys.averageAbsDx, stats.averageAbsDx, maReplace);
-    vsapi->mapSetFloat(props, keys.averageAbsDy, stats.averageAbsDy, maReplace);
-    vsapi->mapSetFloat(props, keys.averageAbsMotion, stats.averageAbsMotion, maReplace);
-    vsapi->mapSetFloat(props, keys.panAmount, stats.panAmount, maReplace);
+    if (includeSadStats) {
+        vsapi->mapSetInt(props, keys.averageSad8x8, stats.averageSad8x8, maReplace);
+        vsapi->mapSetInt(props, keys.maxSad, stats.maxSad8x8, maReplace);
+        vsapi->mapSetInt(props, keys.minSad, stats.minSad8x8, maReplace);
+    }
+    if (includeMotionStats) {
+        vsapi->mapSetFloat(props, keys.averageAbsDx, stats.averageAbsDx, maReplace);
+        vsapi->mapSetFloat(props, keys.averageAbsDy, stats.averageAbsDy, maReplace);
+        vsapi->mapSetFloat(props, keys.averageAbsMotion, stats.averageAbsMotion, maReplace);
+        vsapi->mapSetFloat(props, keys.panAmount, stats.panAmount, maReplace);
+    }
 }
 
 static MotionVectorFrameStats getMotionVectorInternalFrameStats(const VSMap* props, const bool backward,
+                                                                const bool includeSadStats, const bool includeMotionStats,
                                                                 const VSAPI* vsapi) noexcept {
     const auto keys = getMotionVectorInternalFrameStatsKeys(backward);
     MotionVectorFrameStats stats{};
-    stats.averageSadRaw = vsapi->mapGetInt(props, keys.averageSadRaw, 0, nullptr);
-    stats.averageSad8x8 = vsapi->mapGetInt(props, keys.averageSad8x8, 0, nullptr);
-    stats.averageSadHigh2Pct = vsapi->mapGetInt(props, keys.averageSadHigh2Pct, 0, nullptr);
-    stats.averageSadHigh10Pct = vsapi->mapGetInt(props, keys.averageSadHigh10Pct, 0, nullptr);
-    stats.averageSadHigh25Pct = vsapi->mapGetInt(props, keys.averageSadHigh25Pct, 0, nullptr);
-    stats.averageSadHigh50Pct = vsapi->mapGetInt(props, keys.averageSadHigh50Pct, 0, nullptr);
-    stats.averageSadHigh75Pct = vsapi->mapGetInt(props, keys.averageSadHigh75Pct, 0, nullptr);
-    stats.averageSadLow2Pct = vsapi->mapGetInt(props, keys.averageSadLow2Pct, 0, nullptr);
-    stats.averageSadLow10Pct = vsapi->mapGetInt(props, keys.averageSadLow10Pct, 0, nullptr);
-    stats.averageSadLow25Pct = vsapi->mapGetInt(props, keys.averageSadLow25Pct, 0, nullptr);
-    stats.maxSad8x8 = vsapi->mapGetInt(props, keys.maxSad, 0, nullptr);
-    stats.minSad8x8 = vsapi->mapGetInt(props, keys.minSad, 0, nullptr);
-    stats.sadAvgDeviation = vsapi->mapGetInt(props, keys.sadAvgDeviation, 0, nullptr);
-    stats.averageAbsDx = vsapi->mapGetFloat(props, keys.averageAbsDx, 0, nullptr);
-    stats.averageAbsDy = vsapi->mapGetFloat(props, keys.averageAbsDy, 0, nullptr);
-    stats.averageAbsMotion = vsapi->mapGetFloat(props, keys.averageAbsMotion, 0, nullptr);
-    stats.panAmount = vsapi->mapGetFloat(props, keys.panAmount, 0, nullptr);
+    if (includeSadStats) {
+        stats.averageSad8x8 = vsapi->mapGetInt(props, keys.averageSad8x8, 0, nullptr);
+        stats.maxSad8x8 = vsapi->mapGetInt(props, keys.maxSad, 0, nullptr);
+        stats.minSad8x8 = vsapi->mapGetInt(props, keys.minSad, 0, nullptr);
+    }
+    if (includeMotionStats) {
+        stats.averageAbsDx = vsapi->mapGetFloat(props, keys.averageAbsDx, 0, nullptr);
+        stats.averageAbsDy = vsapi->mapGetFloat(props, keys.averageAbsDy, 0, nullptr);
+        stats.averageAbsMotion = vsapi->mapGetFloat(props, keys.averageAbsMotion, 0, nullptr);
+        stats.panAmount = vsapi->mapGetFloat(props, keys.panAmount, 0, nullptr);
+    }
     return stats;
 }
 
 static void deleteMotionVectorInternalFrameStats(VSMap* props, const VSAPI* vsapi) {
     for (const auto backward : { true, false }) {
         const auto keys = getMotionVectorInternalFrameStatsKeys(backward);
-        vsapi->mapDeleteKey(props, keys.averageSadRaw);
         vsapi->mapDeleteKey(props, keys.averageSad8x8);
-        vsapi->mapDeleteKey(props, keys.averageSadHigh2Pct);
-        vsapi->mapDeleteKey(props, keys.averageSadHigh10Pct);
-        vsapi->mapDeleteKey(props, keys.averageSadHigh25Pct);
-        vsapi->mapDeleteKey(props, keys.averageSadHigh50Pct);
-        vsapi->mapDeleteKey(props, keys.averageSadHigh75Pct);
-        vsapi->mapDeleteKey(props, keys.averageSadLow2Pct);
-        vsapi->mapDeleteKey(props, keys.averageSadLow10Pct);
-        vsapi->mapDeleteKey(props, keys.averageSadLow25Pct);
         vsapi->mapDeleteKey(props, keys.maxSad);
         vsapi->mapDeleteKey(props, keys.minSad);
-        vsapi->mapDeleteKey(props, keys.sadAvgDeviation);
         vsapi->mapDeleteKey(props, keys.averageAbsDx);
         vsapi->mapDeleteKey(props, keys.averageAbsDy);
         vsapi->mapDeleteKey(props, keys.averageAbsMotion);
@@ -1890,6 +1773,8 @@ struct RIFEMVPairData final {
     std::shared_ptr<MotionVectorLumaCache> lumaCache;
     std::shared_ptr<MotionVectorPackedCache> packedCache;
     MotionVectorExportBackend mvExportBackend{ MotionVectorExportBackend::Cpu };
+    bool sadStats;
+    bool motionStats;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -1904,6 +1789,8 @@ struct RIFEMVOutputData final {
     int absSadClipRange;
     bool backward;
     bool renderSadMask;
+    bool sadStats;
+    bool motionStats;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
 };
@@ -1918,6 +1805,8 @@ struct RIFEMVApproxPairData final {
     std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
     std::shared_ptr<MotionVectorLumaCache> lumaCache;
     std::shared_ptr<MotionVectorPackedCache> packedCache;
+    bool sadStats;
+    bool motionStats;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -1934,6 +1823,8 @@ struct RIFEMVApproxOutputData final {
     int absSadClipRange;
     bool backward;
     bool renderSadMask;
+    bool sadStats;
+    bool motionStats;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
 };
@@ -2209,7 +2100,9 @@ static const MVAnalysisData& getMotionVectorAnalysisData(const MotionVectorConfi
 
 static void packMotionVectorBlob(const std::vector<MVToolsVector>& vectors, const bool valid,
                                  const MVAnalysisData& analysisData, std::vector<char>& blob,
-                                 MotionVectorFrameStats* const stats = nullptr) {
+                                 MotionVectorFrameStats* const stats = nullptr,
+                                 const bool includeSadStats = true,
+                                 const bool includeMotionStats = true) {
     const auto planeSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) + vectors.size() * sizeof(MVToolsVector));
     const auto groupSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2 + planeSize);
     blob.resize(groupSize);
@@ -2223,8 +2116,8 @@ static void packMotionVectorBlob(const std::vector<MVToolsVector>& vectors, cons
     writeScalar(valid ? MVArraySizeType{ 1 } : MVArraySizeType{ 0 });
     writeScalar(planeSize);
     std::memcpy(blob.data() + offset, vectors.data(), vectors.size() * sizeof(MVToolsVector));
-    if (stats)
-        *stats = computeMotionVectorFrameStats(vectors, analysisData);
+    if (stats && (includeSadStats || includeMotionStats))
+        *stats = computeMotionVectorFrameStats(vectors, analysisData, includeSadStats, includeMotionStats);
 }
 
 static void buildMaskResizeAxisTable(const int srcSize, const int dstSize,
@@ -2341,7 +2234,9 @@ static void buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* refere
                                    std::vector<char>& blob, const VSAPI* vsapi,
                                    const std::vector<float>* currentLumaCache = nullptr,
                                    const std::vector<float>* referenceLumaCache = nullptr,
-                                   MotionVectorFrameStats* const stats = nullptr) {
+                                   MotionVectorFrameStats* const stats = nullptr,
+                                   const bool includeSadStats = true,
+                                   const bool includeMotionStats = true) {
     const auto vectorCount = static_cast<size_t>(ctx.blkX) * ctx.blkY;
     vectors.resize(vectorCount);
 
@@ -2352,7 +2247,7 @@ static void buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* refere
             vector.sad = ctx.invalidSad;
         }
 
-        packMotionVectorBlob(vectors, false, analysisData, blob, stats);
+        packMotionVectorBlob(vectors, false, analysisData, blob, stats, includeSadStats, includeMotionStats);
         return;
     }
 
@@ -2406,7 +2301,7 @@ static void buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* refere
         }
     }
 
-    packMotionVectorBlob(vectors, true, analysisData, blob, stats);
+    packMotionVectorBlob(vectors, true, analysisData, blob, stats, includeSadStats, includeMotionStats);
 }
 
 static MotionVectorExportContext createMotionVectorExportContext(const MotionVectorConfig& config, const bool backward) {
@@ -2483,11 +2378,13 @@ static void buildMotionVectorBlobFromConfig(const VSFrame* current, const VSFram
                                             std::vector<char>& blob, const VSAPI* vsapi,
                                             const std::vector<float>* currentLumaCache = nullptr,
                                             const std::vector<float>* referenceLumaCache = nullptr,
-                                            MotionVectorFrameStats* const stats = nullptr) {
+                                            MotionVectorFrameStats* const stats = nullptr,
+                                            const bool includeSadStats = true,
+                                            const bool includeMotionStats = true) {
     const auto ctx = createMotionVectorExportContext(config, backward);
     buildMVToolsVectorBlob(current, reference, flow, flowWidth, flowHeight, valid, ctx,
                            getMotionVectorAnalysisData(config, backward), vectors, blob, vsapi,
-                           currentLumaCache, referenceLumaCache, stats);
+                           currentLumaCache, referenceLumaCache, stats, includeSadStats, includeMotionStats);
 }
 
 static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFrame* reference, const float* flow,
@@ -2499,7 +2396,9 @@ static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFra
                                              std::vector<MVToolsVector>& forwardVectors,
                                              std::vector<char>& backwardBlob, std::vector<char>& forwardBlob,
                                              MotionVectorFrameStats* const backwardStats = nullptr,
-                                             MotionVectorFrameStats* const forwardStats = nullptr) {
+                                             MotionVectorFrameStats* const forwardStats = nullptr,
+                                             const bool includeSadStats = true,
+                                             const bool includeMotionStats = true) {
     const auto backwardCtx = createMotionVectorExportContext(config, true);
     const auto forwardCtx = createMotionVectorExportContext(config, false);
     const auto vectorCount = static_cast<size_t>(backwardCtx.blkX) * backwardCtx.blkY;
@@ -2512,8 +2411,8 @@ static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFra
             forwardVectors[i] = { 0, 0, forwardCtx.invalidSad };
         }
 
-        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
-        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
         return;
     }
 
@@ -2561,8 +2460,8 @@ static void buildMotionVectorBlobsFromConfig(const VSFrame* current, const VSFra
         }
     }
 
-    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
-    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
 }
 
 static void buildMotionVectorBlobsFromReducedFlow(const VSFrame* current, const VSFrame* reference, const RIFEReducedFlowBlock* reducedFlow,
@@ -2573,7 +2472,9 @@ static void buildMotionVectorBlobsFromReducedFlow(const VSFrame* current, const 
                                                   std::vector<MVToolsVector>& forwardVectors,
                                                   std::vector<char>& backwardBlob, std::vector<char>& forwardBlob,
                                                   MotionVectorFrameStats* const backwardStats = nullptr,
-                                                  MotionVectorFrameStats* const forwardStats = nullptr) {
+                                                  MotionVectorFrameStats* const forwardStats = nullptr,
+                                                  const bool includeSadStats = true,
+                                                  const bool includeMotionStats = true) {
     const auto backwardCtx = createMotionVectorExportContext(config, true);
     const auto forwardCtx = createMotionVectorExportContext(config, false);
     const auto vectorCount = static_cast<size_t>(backwardCtx.blkX) * backwardCtx.blkY;
@@ -2586,8 +2487,8 @@ static void buildMotionVectorBlobsFromReducedFlow(const VSFrame* current, const 
             forwardVectors[i] = { 0, 0, forwardCtx.invalidSad };
         }
 
-        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
-        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
         return;
     }
 
@@ -2625,8 +2526,8 @@ static void buildMotionVectorBlobsFromReducedFlow(const VSFrame* current, const 
         }
     }
 
-    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
-    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
 }
 
 static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuVectors,
@@ -2635,7 +2536,9 @@ static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuV
                                                  std::vector<MVToolsVector>& forwardVectors,
                                                  std::vector<char>& backwardBlob, std::vector<char>& forwardBlob,
                                                  MotionVectorFrameStats* const backwardStats = nullptr,
-                                                 MotionVectorFrameStats* const forwardStats = nullptr) {
+                                                 MotionVectorFrameStats* const forwardStats = nullptr,
+                                                 const bool includeSadStats = true,
+                                                 const bool includeMotionStats = true) {
     const auto vectorCount = static_cast<size_t>(config.blkX) * config.blkY;
     backwardVectors.resize(vectorCount);
     forwardVectors.resize(vectorCount);
@@ -2646,8 +2549,8 @@ static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuV
             forwardVectors[i] = { 0, 0, config.invalidSad };
         }
 
-        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
-        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
         return;
     }
 
@@ -2662,15 +2565,19 @@ static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuV
         forwardVectors[i] = { forwardGpuVectors[i].x, forwardGpuVectors[i].y, applySadMultiplier(forwardGpuVectors[i].rawSad) };
     }
 
-    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats);
-    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats);
+    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
 }
 
 static std::vector<char> buildInvalidMotionVectorBlob(const MotionVectorConfig& config, const bool backward,
-                                                      MotionVectorFrameStats* const stats = nullptr) {
+                                                      MotionVectorFrameStats* const stats = nullptr,
+                                                      const bool includeSadStats = true,
+                                                      const bool includeMotionStats = true) {
     std::vector<MVToolsVector> vectors;
     std::vector<char> blob;
-    buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, config, backward, vectors, blob, nullptr, nullptr, nullptr, stats);
+    buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, config, backward,
+                                    vectors, blob, nullptr, nullptr, nullptr, stats,
+                                    includeSadStats, includeMotionStats);
     return blob;
 }
 
@@ -2751,7 +2658,9 @@ static void buildMotionVectorBlobFromDisplacement(const VSFrame* current, const 
                                                   std::vector<char>& blob, const VSAPI* vsapi,
                                                   const std::vector<float>* currentLumaCache = nullptr,
                                                   const std::vector<float>* referenceLumaCache = nullptr,
-                                                  MotionVectorFrameStats* const stats = nullptr) {
+                                                  MotionVectorFrameStats* const stats = nullptr,
+                                                  const bool includeSadStats = true,
+                                                  const bool includeMotionStats = true) {
     const auto ctx = createMotionVectorExportContext(config, backward);
     const auto vectorCount = static_cast<size_t>(ctx.blkX) * ctx.blkY;
     vectors.resize(vectorCount);
@@ -2762,7 +2671,7 @@ static void buildMotionVectorBlobFromDisplacement(const VSFrame* current, const 
             vector.y = 0;
             vector.sad = ctx.invalidSad;
         }
-        packMotionVectorBlob(vectors, false, getMotionVectorAnalysisData(config, backward), blob, stats);
+        packMotionVectorBlob(vectors, false, getMotionVectorAnalysisData(config, backward), blob, stats, includeSadStats, includeMotionStats);
         return;
     }
 
@@ -2811,7 +2720,7 @@ static void buildMotionVectorBlobFromDisplacement(const VSFrame* current, const 
         }
     }
 
-    packMotionVectorBlob(vectors, true, getMotionVectorAnalysisData(config, backward), blob, stats);
+    packMotionVectorBlob(vectors, true, getMotionVectorAnalysisData(config, backward), blob, stats, includeSadStats, includeMotionStats);
 }
 
 static void zeroMotionVectorFrame(VSFrame* frame, const VSVideoInfo& vi, const VSAPI* vsapi);
@@ -2819,7 +2728,9 @@ static void zeroMotionVectorFrame(VSFrame* frame, const VSVideoInfo& vi, const V
 static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisData& analysisData,
                                         const char* vectorBlob, const int vectorBlobSize,
                                         const MotionVectorFrameStats& stats, const int absSadClipRange,
-                                        const bool renderSadMask, MotionVectorPerfStats* const perf,
+                                        const bool renderSadMask,
+                                        const bool includeSadStats, const bool includeMotionStats,
+                                        MotionVectorPerfStats* const perf,
                                         VSCore* core, const VSAPI* vsapi) {
     auto dst = vsapi->newVideoFrame(&vi.format, vi.width, vi.height, nullptr, core);
     if (renderSadMask) {
@@ -2831,7 +2742,7 @@ static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisD
         zeroMotionVectorFrame(dst, vi, vsapi);
     }
     auto props = vsapi->getFramePropertiesRW(dst);
-    setMotionVectorProperties(props, analysisData, vectorBlob, vectorBlobSize, stats, vsapi);
+    setMotionVectorProperties(props, analysisData, vectorBlob, vectorBlobSize, stats, includeSadStats, includeMotionStats, vsapi);
     return dst;
 }
 
@@ -2872,6 +2783,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
         auto& forwardBlob = scratch.forwardBlob;
         MotionVectorFrameStats backwardStats{};
         MotionVectorFrameStats forwardStats{};
+        const auto needStats = d->sadStats || d->motionStats;
         if (reference) {
             const auto width = vsapi->getFrameWidth(current, 0);
             const auto height = vsapi->getFrameHeight(current, 0);
@@ -2987,27 +2899,41 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             if (useGpuFlowReduce) {
                 buildMotionVectorBlobsFromReducedFlow(currentSource, referenceSource, scratch.reducedFlow.data(), true, d->mvConfig, vsapi,
                                                       currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
-                                                      backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+                                                      backwardBlob, forwardBlob,
+                                                      needStats ? &backwardStats : nullptr,
+                                                      needStats ? &forwardStats : nullptr,
+                                                      d->sadStats, d->motionStats);
             } else if (useGpuFull) {
                 buildMotionVectorBlobsFromGpuVectors(scratch.gpuVectors.data(), true, d->mvConfig,
                                                      backwardVectors, forwardVectors, backwardBlob, forwardBlob,
-                                                     &backwardStats, &forwardStats);
+                                                     needStats ? &backwardStats : nullptr,
+                                                     needStats ? &forwardStats : nullptr,
+                                                     d->sadStats, d->motionStats);
             } else {
                 buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
                                                  currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
-                                                 backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+                                                 backwardBlob, forwardBlob,
+                                                 needStats ? &backwardStats : nullptr,
+                                                 needStats ? &forwardStats : nullptr,
+                                                 d->sadStats, d->motionStats);
             }
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
         } else {
-            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, true, backwardVectors, backwardBlob, nullptr, nullptr, nullptr, &backwardStats);
-            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, false, forwardVectors, forwardBlob, nullptr, nullptr, nullptr, &forwardStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, true,
+                                            backwardVectors, backwardBlob, nullptr, nullptr, nullptr,
+                                            needStats ? &backwardStats : nullptr, d->sadStats, d->motionStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, false,
+                                            forwardVectors, forwardBlob, nullptr, nullptr, nullptr,
+                                            needStats ? &forwardStats : nullptr, d->sadStats, d->motionStats);
         }
 
         vsapi->mapSetData(props, RIFEMVBackwardVectorsInternalKey, backwardBlob.data(), static_cast<int>(backwardBlob.size()), dtBinary, maReplace);
         vsapi->mapSetData(props, RIFEMVForwardVectorsInternalKey, forwardBlob.data(), static_cast<int>(forwardBlob.size()), dtBinary, maReplace);
-        setMotionVectorInternalFrameStats(props, backwardStats, true, vsapi);
-        setMotionVectorInternalFrameStats(props, forwardStats, false, vsapi);
+        if (needStats) {
+            setMotionVectorInternalFrameStats(props, backwardStats, d->sadStats, d->motionStats, true, vsapi);
+            setMotionVectorInternalFrameStats(props, forwardStats, d->sadStats, d->motionStats, false, vsapi);
+        }
 
         vsapi->freeFrame(current);
         vsapi->freeFrame(reference);
@@ -3035,7 +2961,7 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
         } else {
             return createMotionVectorFrame(d->vi, d->analysisData, d->invalidBlob.data(),
                                            static_cast<int>(d->invalidBlob.size()), d->invalidStats,
-                                           d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
+                                           d->absSadClipRange, d->renderSadMask, d->sadStats, d->motionStats, d->perf.get(), core, vsapi);
         }
     } else if (activationReason == arAllFramesReady) {
         const auto outputStartNs = d->perfStats ? monotonicNowNs() : 0;
@@ -3051,14 +2977,15 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
             const auto blobKey = d->backward ? RIFEMVBackwardVectorsInternalKey : RIFEMVForwardVectorsInternalKey;
             vectorBlob = vsapi->mapGetData(pairProps, blobKey, 0, nullptr);
             vectorBlobSize = vsapi->mapGetDataSize(pairProps, blobKey, 0, nullptr);
-            stats = getMotionVectorInternalFrameStats(pairProps, d->backward, vsapi);
+            if (d->sadStats || d->motionStats)
+                stats = getMotionVectorInternalFrameStats(pairProps, d->backward, d->sadStats, d->motionStats, vsapi);
         } else {
             vectorBlob = d->invalidBlob.data();
             vectorBlobSize = static_cast<int>(d->invalidBlob.size());
         }
 
         auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, stats,
-                                           d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
+                                           d->absSadClipRange, d->renderSadMask, d->sadStats, d->motionStats, d->perf.get(), core, vsapi);
 
         vsapi->freeFrame(pairFrame);
         if (d->perfStats) {
@@ -3104,6 +3031,7 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
         auto& backwardDisplacement = scratch.backwardDisplacement;
         auto& forwardDisplacement = scratch.forwardDisplacement;
         const auto planeSize = static_cast<size_t>(d->mvConfig.inferenceWidth) * d->mvConfig.inferenceHeight;
+        const auto needStats = d->sadStats || d->motionStats;
 
         if (reference) {
             const auto width = vsapi->getFrameWidth(current, 0);
@@ -3186,7 +3114,10 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
             buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
                                              currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
-                                             backwardBlob, forwardBlob, &backwardStats, &forwardStats);
+                                             backwardBlob, forwardBlob,
+                                             needStats ? &backwardStats : nullptr,
+                                             needStats ? &forwardStats : nullptr,
+                                             d->sadStats, d->motionStats);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
             const auto displacementBuildStartNs = d->perfStats ? monotonicNowNs() : 0;
@@ -3195,16 +3126,22 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             if (d->perfStats)
                 accumulatePerfStat(d->perf->displacementBuildNs, monotonicNowNs() - displacementBuildStartNs);
         } else {
-            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, true, backwardVectors, backwardBlob, nullptr, nullptr, nullptr, &backwardStats);
-            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, false, forwardVectors, forwardBlob, nullptr, nullptr, nullptr, &forwardStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, true,
+                                            backwardVectors, backwardBlob, nullptr, nullptr, nullptr,
+                                            needStats ? &backwardStats : nullptr, d->sadStats, d->motionStats);
+            buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, 0, 0, false, d->mvConfig, false,
+                                            forwardVectors, forwardBlob, nullptr, nullptr, nullptr,
+                                            needStats ? &forwardStats : nullptr, d->sadStats, d->motionStats);
             backwardDisplacement.assign(planeSize * 2, 0.0f);
             forwardDisplacement.assign(planeSize * 2, 0.0f);
         }
 
         vsapi->mapSetData(props, RIFEMVBackwardVectorsInternalKey, backwardBlob.data(), static_cast<int>(backwardBlob.size()), dtBinary, maReplace);
         vsapi->mapSetData(props, RIFEMVForwardVectorsInternalKey, forwardBlob.data(), static_cast<int>(forwardBlob.size()), dtBinary, maReplace);
-        setMotionVectorInternalFrameStats(props, backwardStats, true, vsapi);
-        setMotionVectorInternalFrameStats(props, forwardStats, false, vsapi);
+        if (needStats) {
+            setMotionVectorInternalFrameStats(props, backwardStats, d->sadStats, d->motionStats, true, vsapi);
+            setMotionVectorInternalFrameStats(props, forwardStats, d->sadStats, d->motionStats, false, vsapi);
+        }
         vsapi->mapSetData(props, RIFEMVBackwardDisplacementInternalKey,
                           reinterpret_cast<const char*>(backwardDisplacement.data()),
                           static_cast<int>(backwardDisplacement.size() * sizeof(float)), dtBinary, maReplace);
@@ -3234,7 +3171,7 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
     const auto valid = d->backward ? n + delta < d->vi.numFrames : n >= delta;
     const auto createInvalidFrame = [&]() {
         return createMotionVectorFrame(d->vi, d->analysisData, d->invalidBlob.data(), static_cast<int>(d->invalidBlob.size()), d->invalidStats,
-                                       d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
+                                       d->absSadClipRange, d->renderSadMask, d->sadStats, d->motionStats, d->perf.get(), core, vsapi);
     };
 
     if (activationReason == arInitial) {
@@ -3292,9 +3229,11 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
                 return nullptr;
             }
 
-            const auto stats = getMotionVectorInternalFrameStats(props, d->backward, vsapi);
+            MotionVectorFrameStats stats{};
+            if (d->sadStats || d->motionStats)
+                stats = getMotionVectorInternalFrameStats(props, d->backward, d->sadStats, d->motionStats, vsapi);
             auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, stats,
-                                               d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
+                                               d->absSadClipRange, d->renderSadMask, d->sadStats, d->motionStats, d->perf.get(), core, vsapi);
             cleanup();
             if (d->perfStats) {
                 accumulatePerfStat(d->perf->outputFrames, 1);
@@ -3327,16 +3266,18 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
             accumulatePerfStat(d->perf->composeNs, monotonicNowNs() - composeStartNs);
         const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
         MotionVectorFrameStats stats{};
+        const auto needStats = d->sadStats || d->motionStats;
         auto& vectors = d->backward ? scratch.backwardVectors : scratch.forwardVectors;
         auto& vectorBlob = d->backward ? scratch.backwardBlob : scratch.forwardBlob;
         buildMotionVectorBlobFromDisplacement(current, reference,
                                               scratch.composedX.data(), scratch.composedY.data(), width, height, true,
-                                              d->mvConfig, d->backward, vectors, vectorBlob, vsapi, nullptr, nullptr, &stats);
+                                              d->mvConfig, d->backward, vectors, vectorBlob, vsapi, nullptr, nullptr,
+                                              needStats ? &stats : nullptr, d->sadStats, d->motionStats);
         if (d->perfStats)
             accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
 
         auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob.data(), static_cast<int>(vectorBlob.size()), stats,
-                                           d->absSadClipRange, d->renderSadMask, d->perf.get(), core, vsapi);
+                                           d->absSadClipRange, d->renderSadMask, d->sadStats, d->motionStats, d->perf.get(), core, vsapi);
         cleanup();
         if (d->perfStats) {
             accumulatePerfStat(d->perf->outputFrames, 1);
@@ -3394,6 +3335,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     bool hasGPUInstance{};
     int mvAbsSADClipRange{};
     bool mvRenderSadMask{ true };
+    bool mvSadStats{};
+    bool mvMotionStats{};
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
@@ -3451,6 +3394,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto* matrixIn = err ? "709" : matrixInValue;
         const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
         const auto* rangeIn = err ? "full" : rangeInValue;
+        mvSadStats = !!vsapi->mapGetInt(in, "sad_stats", 0, &err);
+        mvMotionStats = !!vsapi->mapGetInt(in, "motion_stats", 0, &err);
         const auto perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
         auto mvBlockSizeX{ vsapi->mapGetIntSaturated(in, "blksize_x", 0, &err) };
         if (err)
@@ -3585,7 +3530,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (pairData->mvExportBackend == MotionVectorExportBackend::GpuFull)
             validateGpuFullMotionVectorBackend(pairData->mvConfig);
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
-                                    pairData->mvExportBackend, sharedPackedCacheEnabled, packedCacheMiB, perfStats,
+                                    pairData->mvExportBackend, sharedPackedCacheEnabled, packedCacheMiB, mvSadStats, mvMotionStats, perfStats,
                                     pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, true);
 
@@ -3630,6 +3575,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         } else {
             pairData->packedCache = createMotionVectorPackedCache(packedCacheMaxEntries);
         }
+        pairData->sadStats = mvSadStats;
+        pairData->motionStats = mvMotionStats;
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -3680,10 +3627,14 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     backwardData->node = vsapi->addNodeRef(pairNode);
     backwardData->vi = outputVi;
     backwardData->analysisData = mvConfig.backwardAnalysisData;
-    backwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, true, &backwardData->invalidStats);
+    backwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, true,
+                                                             (mvSadStats || mvMotionStats) ? &backwardData->invalidStats : nullptr,
+                                                             mvSadStats, mvMotionStats);
     backwardData->absSadClipRange = mvAbsSADClipRange;
     backwardData->backward = true;
     backwardData->renderSadMask = mvRenderSadMask;
+    backwardData->sadStats = mvSadStats;
+    backwardData->motionStats = mvMotionStats;
     backwardData->perfStats = mvPerfStatsEnabled;
     backwardData->perf = mvPerf;
     VSFilterDependency backwardDeps[]{ { backwardData->node, rpGeneral } };
@@ -3701,10 +3652,14 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     forwardData->node = vsapi->addNodeRef(pairNode);
     forwardData->vi = outputVi;
     forwardData->analysisData = mvConfig.forwardAnalysisData;
-    forwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, false, &forwardData->invalidStats);
+    forwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, false,
+                                                            (mvSadStats || mvMotionStats) ? &forwardData->invalidStats : nullptr,
+                                                            mvSadStats, mvMotionStats);
     forwardData->absSadClipRange = mvAbsSADClipRange;
     forwardData->backward = false;
     forwardData->renderSadMask = mvRenderSadMask;
+    forwardData->sadStats = mvSadStats;
+    forwardData->motionStats = mvMotionStats;
     forwardData->perfStats = mvPerfStatsEnabled;
     forwardData->perf = mvPerf;
     VSFilterDependency forwardDeps[]{ { forwardData->node, rpGeneral } };
@@ -3737,6 +3692,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
     std::vector<VSNode*> outputNodes;
     int mvAbsSADClipRange{};
     bool mvRenderSadMask{ true };
+    bool mvSadStats{};
+    bool mvMotionStats{};
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
@@ -3788,6 +3745,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         const auto* matrixIn = err ? "709" : matrixInValue;
         const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
         const auto* rangeIn = err ? "full" : rangeInValue;
+        mvSadStats = !!vsapi->mapGetInt(in, "sad_stats", 0, &err);
+        mvMotionStats = !!vsapi->mapGetInt(in, "motion_stats", 0, &err);
         auto mvBlockSizeX{ vsapi->mapGetIntSaturated(in, "blksize_x", 0, &err) };
         if (err)
             mvBlockSizeX = 16;
@@ -3920,7 +3879,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
                                                             mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
         }
         printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
-                                    MotionVectorExportBackend::Cpu, sharedPackedCacheEnabled, packedCacheMiB, perfStats,
+                                    MotionVectorExportBackend::Cpu, sharedPackedCacheEnabled, packedCacheMiB, mvSadStats, mvMotionStats, perfStats,
                                     pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
                                     mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, false);
 
@@ -3966,6 +3925,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         } else {
             pairData->packedCache = createMotionVectorPackedCache(packedCacheMaxEntries);
         }
+        pairData->sadStats = mvSadStats;
+        pairData->motionStats = mvMotionStats;
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -4020,10 +3981,14 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         outputData->vi = outputVi;
         outputData->mvConfig = mvConfig;
         outputData->analysisData = backward ? mvConfig.backwardAnalysisData : mvConfig.forwardAnalysisData;
-        outputData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, backward, &outputData->invalidStats);
+        outputData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, backward,
+                                                               (mvSadStats || mvMotionStats) ? &outputData->invalidStats : nullptr,
+                                                               mvSadStats, mvMotionStats);
         outputData->absSadClipRange = mvAbsSADClipRange;
         outputData->backward = backward;
         outputData->renderSadMask = mvRenderSadMask;
+        outputData->sadStats = mvSadStats;
+        outputData->motionStats = mvMotionStats;
         outputData->perfStats = approxPerfStats;
         outputData->perf = approxPerf;
         VSFilterDependency deps[]{ { outputData->node, rpGeneral }, { outputData->sourceNode, rpGeneral } };
@@ -4110,6 +4075,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "bits:int:opt;"
                              "abs_sad_clip_range:int:opt;"
                              "render_sad_mask:int:opt;"
+                             "sad_stats:int:opt;"
+                             "motion_stats:int:opt;"
                              "sad_multiplier:float:opt;"
                              "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
@@ -4142,6 +4109,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "bits:int:opt;"
                              "abs_sad_clip_range:int:opt;"
                              "render_sad_mask:int:opt;"
+                             "sad_stats:int:opt;"
+                             "motion_stats:int:opt;"
                              "sad_multiplier:float:opt;"
                              "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
@@ -4174,6 +4143,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "bits:int:opt;"
                              "abs_sad_clip_range:int:opt;"
                              "render_sad_mask:int:opt;"
+                             "sad_stats:int:opt;"
+                             "motion_stats:int:opt;"
                              "sad_multiplier:float:opt;"
                              "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"

@@ -40,7 +40,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - By default the rendered SAD carrier mask is relative: it maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
 - If `abs_sad_clip_range > 0`, the rendered carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
 - Frames without a valid reference still export invalid MVTools vectors as before. When the SAD mask is rendered, relative mode makes it solid `255` and absolute mode shows the clipped sentinel SAD, which will usually also be `255`.
-- Exported motion-vector frames also include `RMV_AvgSad` as an integer 8x8-equivalent average SAD in MVTools threshold space, `RMV_AvgSadNorm` as an integer frame property preserving the previous raw average exported block SAD behavior, `RMV_AvgSadHigh2Pct`, `RMV_AvgSadHigh10Pct`, `RMV_AvgSadHigh25Pct`, `RMV_AvgSadHigh50Pct`, `RMV_AvgSadHigh75Pct`, `RMV_AvgSadLow2Pct`, `RMV_AvgSadLow10Pct`, `RMV_AvgSadLow25Pct`, `RMV_MaxSad`, `RMV_MinSad`, and `RMV_SadAvgDeviation` as integer 8x8-equivalent SAD summary properties, plus `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` as float frame properties. `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
+- Exported motion-vector frames can optionally include SAD summary frame properties `RMV_AvgSad`, `RMV_MaxSad`, and `RMV_MinSad` (controlled by `sad_stats`), and motion-summary frame properties `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` (controlled by `motion_stats`). `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
 ## Motion-vector arguments
@@ -145,8 +145,20 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `render_sad_mask`
   Controls whether the `Gray8` carrier plane is populated with the direction-specific SAD mask.
   Default: `True`.
-  If disabled, the carrier plane is left black while all MVTools frame properties and exported `RMV_*` stats remain unchanged.
+  If disabled, the carrier plane is left black while motion vectors and metadata remain unchanged.
   This can reduce CPU overhead when downstream consumers only need the frame properties.
+
+- `sad_stats`
+  Controls whether SAD summary frame properties are computed and attached.
+  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
+  Default: `False`.
+  If enabled, `RMV_AvgSad`, `RMV_MaxSad`, and `RMV_MinSad` are attached.
+
+- `motion_stats`
+  Controls whether motion summary frame properties are computed and attached.
+  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
+  Default: `False`.
+  If enabled, `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` are attached.
 
 - `meta_clip`
   Metadata-source clip for MVTools compatibility.
@@ -182,7 +194,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
