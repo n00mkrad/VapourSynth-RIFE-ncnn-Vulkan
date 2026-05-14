@@ -7,29 +7,20 @@ It exports motion vectors in the same binary frame-property format used by MVToo
 - `MVTools_MVAnalysisData`
 - `MVTools_vectors`
 
-That makes it possible to feed RIFE-derived motion into MVTools consumers such as `mv.Mask`, `mv.Flow`, `mv.FlowBlur`, and, with suitable settings, degrain-style functions.
+That makes it possible to feed RIFE-derived motion into MVTools consumers such as `mv.Mask`, `mv.Flow`, or `mv.Degrain*`.
 
 Interpolation is no longer part of this fork. Use the unmodified upstream RIFE plugin when you want frame interpolation output.
 
 ## What this build adds
 
 - `rmv.RIFEMV(...)`
-  Returns both backward and forward vector clips at once.
-  The current implementation shares one inference pass per adjacent frame pair.
+  Returns both backward and forward vector clips from one inference pass.
 
 - `rmv.RIFEMVApprox2(...)`
   Returns approximate vectors for deltas 1 and 2 by composing adjacent motions.
 
 - `rmv.RIFEMVApprox3(...)`
   Returns approximate vectors for deltas 1, 2, and 3 by composing adjacent motions.
-
-## Migration from removed `rmv.RIFE`
-
-- `rmv.RIFE(...)` has been removed from this fork.
-- For interpolation, use the unmodified upstream RIFE plugin.
-- If you only need one direction, call `rmv.RIFEMV(...)` and use the output you need.
-- `meta_clip` has been removed from `rmv.RIFEMV`, `rmv.RIFEMVApprox2`, and `rmv.RIFEMVApprox3`. Existing scripts must stop passing `meta_clip`.
-- `sad_multiplier` has been removed from `rmv.RIFEMV`, `rmv.RIFEMVApprox2`, and `rmv.RIFEMVApprox3`. Apply any SAD scaling downstream instead.
 
 ## Important limitations
 
@@ -47,7 +38,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ## Motion-vector arguments
 
 - `flow_scale`
-  Scales the image before flow estimation and rescales vectors back to the original image coordinates. Smaller values can reduce cost and can sometimes behave better on large motion.
+  Scales the image before flow estimation and rescales vectors back to the original image coordinates.  
   `flow_scale` replaces the `uhd` bool parameter used in the original plugin. To match the old behavior, use `0.5` for `uhd=True` or `1.0` (default) for `uhd=False`.
   Accepted values are restricted to: `0.25`, `0.5`, `1.0`, `2.0`, `4.0`.
 
