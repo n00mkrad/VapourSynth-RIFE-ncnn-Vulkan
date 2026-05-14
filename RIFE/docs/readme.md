@@ -28,14 +28,14 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `rmv.RIFE(...)` has been removed from this fork.
 - For interpolation, use the unmodified upstream RIFE plugin.
 - If you only need one direction, call `rmv.RIFEMV(...)` and use the output you need.
+- `meta_clip` has been removed from `rmv.RIFEMV`, `rmv.RIFEMVApprox2`, and `rmv.RIFEMVApprox3`. Existing scripts must stop passing `meta_clip`.
 
 ## Important limitations
 
 - Motion-vector export supports `rife-v3.1`, `rife-v3.9`, and `rife-v4.2+` model families.
 - Legacy `rife-v4` as well as `rife-v4.0` and `rife-v4.1` are not supported for motion-vector export.
 - Motion-vector APIs accept either constant-format `RGBS` or constant-format `YUV`. Non-`RGBS` `YUV` input is converted internally to `RGBS` for RIFE inference.
-- MVTools usually operates on a different clip, often `YUV420P8`. `meta_clip` is still optional and can be used explicitly as the metadata source.
-- If the input is non-`RGBS` and `meta_clip` is omitted, the plugin now uses the original input clip as the metadata source automatically.
+- MVTools metadata is derived from the main `clip`. For non-`RGBS` input, the original input clip is used as the metadata source automatically.
 - Vector clips are `Gray8` carrier clips. The motion data still lives in frame properties. By default the pixel plane contains a SAD mask derived from the exported block SADs for that direction, and `render_sad_mask=False` leaves that plane black instead.
 - By default the rendered SAD carrier mask is relative: it maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
 - If `abs_sad_clip_range > 0`, the rendered carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
@@ -125,7 +125,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `bits`
   Synthetic bit depth used when computing exported SAD values.
   Default: `8`.
-  Leaving this at `8` keeps exported SAD on an 8-bit scale regardless of source or `meta_clip` bit depth.
+  Leaving this at `8` keeps exported SAD on an 8-bit scale regardless of source clip bit depth.
   Set a higher value only if you explicitly want larger SAD values that track a higher-bit-depth scale.
   This also sets the exported MVTools `bitsPerSample` metadata so downstream filters scale `thsad` and `thscd1` against the same SAD range.
 
@@ -160,12 +160,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Default: `False`.
   If enabled, `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` are attached.
 
-- `meta_clip`
-  Metadata-source clip for MVTools compatibility.
-  This should usually be the actual clip you will feed to MVTools, for example the original `YUV420P8` source.
-  If omitted and `clip` is non-`RGBS`, the plugin uses the original input clip automatically.
-  This parameter is named `meta_clip` instead of plain `clip` to avoid conflicting with the primary input clip parameter.
-
 - `matrix_in_s`
   Input matrix used when the MV API receives a non-`RGBS` `YUV` clip and performs internal conversion to `RGBS`.
   Default: `"709"`.
@@ -194,7 +188,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, sad_multiplier=1.0, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -304,7 +298,7 @@ den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 
 - Use `block_reduce=1` as the default starting point for degraining.
 - You can pass YUV clips directly; internal conversion to RGBS is done automatically for MV inference.
-- `meta_clip` is optional. For non-`RGBS` input it is auto-inferred from the original input clip when omitted; pass `meta_clip` explicitly only if you want a different metadata source.
+- MVTools metadata always comes from the main `clip`.
 - Keep `pel`, `hpad`, and `vpad` consistent with the `mv.Super` clip you use downstream.
 - If a function only needs one direction, call `rmv.RIFEMV(...)` and use either `mvbw` or `mvfw`.
 - If you need both directions for delta 1, prefer `rmv.RIFEMV(...)`.

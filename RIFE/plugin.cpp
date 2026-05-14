@@ -3328,7 +3328,6 @@ static void VS_CC rifeMVOutputFree(void* instanceData, [[maybe_unused]] VSCore* 
 
 static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
     auto pairData{ std::make_unique<RIFEMVPairData>() };
-    VSNode* mvClip{};
     VSNode* pairNode{};
     VSNode* backwardNode{};
     VSNode* forwardNode{};
@@ -3344,8 +3343,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         pairData->vi = *vsapi->getVideoInfo(pairData->node);
         const auto sourceVi = pairData->vi;
         bool sourceConverted{};
-        VSVideoInfo mvClipVi{};
-        bool hasMVClip{};
         int err;
 
         if (ncnn::create_gpu_instance())
@@ -3438,21 +3435,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             mvBlockReduce = MVBlockReduceAverage;
         const auto mvUseChroma = !!vsapi->mapGetInt(in, "chroma", 0, &err);
 
-        mvClip = vsapi->mapGetNode(in, "meta_clip", 0, &err);
-        if (!err) {
-            mvClipVi = *vsapi->getVideoInfo(mvClip);
-            hasMVClip = true;
-        }
-
-        if (hasMVClip) {
-            if (!vsh::isConstantVideoFormat(&mvClipVi))
-                throw "meta_clip must have a constant format";
-
-            if (mvClipVi.width != sourceVi.width || mvClipVi.height != sourceVi.height)
-                throw "meta_clip dimensions must match clip";
-
-        }
-
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
             throw "invalid GPU device";
 
@@ -3523,7 +3505,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         pairData->sourceNode = clipSet.sourceNode;
         sourceConverted = clipSet.convertedFromYUV;
 
-        const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
+        const VSVideoInfo* metadataVi = sourceConverted ? &sourceVi : nullptr;
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, mvDelta,
                                   mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
@@ -3536,11 +3518,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
             throw "failed to create RIFEMV output format";
-
-        if (mvClip) {
-            vsapi->freeNode(mvClip);
-            mvClip = nullptr;
-        }
 
         const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
@@ -3590,7 +3567,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         vsapi->mapSetError(out, ("RIFEMV: "s + error.what()).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
-        vsapi->freeNode(mvClip);
 
         if (hasGPUInstance && --numGPUInstances == 0)
             ncnn::destroy_gpu_instance();
@@ -3599,7 +3575,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         vsapi->mapSetError(out, ("RIFEMV: "s + error).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
-        vsapi->freeNode(mvClip);
 
         if (hasGPUInstance && --numGPUInstances == 0)
             ncnn::destroy_gpu_instance();
@@ -3682,11 +3657,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* vsapi,
                                    const int maxDelta, const char* functionName) {
     auto pairData{ std::make_unique<RIFEMVApproxPairData>() };
-    VSNode* mvClip{};
     VSNode* sourceNode{};
     VSNode* pairNode{};
-    VSVideoInfo mvClipVi{};
-    bool hasMVClip{};
     bool hasGPUInstance{};
     std::vector<MotionVectorConfig> outputConfigs(maxDelta + 1);
     std::vector<VSNode*> outputNodes;
@@ -3785,21 +3757,6 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
             mvBlockReduce = MVBlockReduceAverage;
         const auto mvUseChroma = !!vsapi->mapGetInt(in, "chroma", 0, &err);
 
-        mvClip = vsapi->mapGetNode(in, "meta_clip", 0, &err);
-        if (!err) {
-            mvClipVi = *vsapi->getVideoInfo(mvClip);
-            hasMVClip = true;
-        }
-
-        if (hasMVClip) {
-            if (!vsh::isConstantVideoFormat(&mvClipVi))
-                throw "meta_clip must have a constant format";
-
-            if (mvClipVi.width != sourceVi.width || mvClipVi.height != sourceVi.height)
-                throw "meta_clip dimensions must match clip";
-
-        }
-
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
             throw "invalid GPU device";
 
@@ -3867,7 +3824,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         pairData->sourceNode = clipSet.sourceNode;
         sourceConverted = clipSet.convertedFromYUV;
 
-        const VSVideoInfo* metadataVi = hasMVClip ? &mvClipVi : (sourceConverted ? &sourceVi : nullptr);
+        const VSVideoInfo* metadataVi = sourceConverted ? &sourceVi : nullptr;
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry,
                                                       mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, 1,
@@ -3885,11 +3842,6 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
             throw "failed to create output format";
-
-        if (mvClip) {
-            vsapi->freeNode(mvClip);
-            mvClip = nullptr;
-        }
 
         sourceNode = vsapi->addNodeRef(pairData->sourceNode);
         const auto localFlowInFlight = sharedFlowInFlightSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
@@ -3939,7 +3891,6 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         vsapi->mapSetError(out, (std::string(functionName) + ": " + error.what()).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
-        vsapi->freeNode(mvClip);
         vsapi->freeNode(sourceNode);
 
         if (hasGPUInstance && --numGPUInstances == 0)
@@ -3949,7 +3900,6 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         vsapi->mapSetError(out, (std::string(functionName) + ": " + error).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
-        vsapi->freeNode(mvClip);
         vsapi->freeNode(sourceNode);
 
         if (hasGPUInstance && --numGPUInstances == 0)
@@ -4078,7 +4028,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "sad_stats:int:opt;"
                              "motion_stats:int:opt;"
                              "sad_multiplier:float:opt;"
-                             "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
                              "range_in_s:data:opt;"
                              "hpad:int:opt;"
@@ -4112,7 +4061,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "sad_stats:int:opt;"
                              "motion_stats:int:opt;"
                              "sad_multiplier:float:opt;"
-                             "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
                              "range_in_s:data:opt;"
                              "hpad:int:opt;"
@@ -4146,7 +4094,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "sad_stats:int:opt;"
                              "motion_stats:int:opt;"
                              "sad_multiplier:float:opt;"
-                             "meta_clip:vnode:opt;"
                              "matrix_in_s:data:opt;"
                              "range_in_s:data:opt;"
                              "hpad:int:opt;"
