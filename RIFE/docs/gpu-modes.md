@@ -15,8 +15,6 @@ Mode mapping:
 - `1` = `gpu_flow_reduce`
 - `2` = `gpu_full`
 
-String values such as `"cpu"`, `"gpu_flow_reduce"`, and `"gpu_full"` are not accepted.
-
 `RIFEMVApprox2` and `RIFEMVApprox3` do not expose this option. They currently need dense displacement data for temporal composition, so they use the dense CPU export path internally.
 
 ## Mode Summary
