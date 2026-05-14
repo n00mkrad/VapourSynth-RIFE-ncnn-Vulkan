@@ -23,7 +23,7 @@ Mode mapping:
 |---|---:|---|---|---|
 | `0` (`cpu`) | Full dense flow | none | flow reduction, vector conversion, SAD, stats, blob packing | safest default |
 | `1` (`gpu_flow_reduce`) | compact block flow | flow reduction only | vector conversion, SAD, stats, blob packing | recommended GPU-assisted mode |
-| `2` (`gpu_full`) | compact block vectors | flow reduction, vector conversion, clamping, raw SAD | `sad_multiplier`, stats, blob packing | experimental, narrower config support |
+| `2` (`gpu_full`) | compact block vectors | flow reduction, vector conversion, clamping, raw SAD | stats, blob packing | experimental, narrower config support |
 
 For a 1920x1024 clip using the default 16x8 blocks and 8x4 overlap, the approximate readback sizes are:
 
@@ -106,7 +106,6 @@ The shader performs:
 
 The CPU still performs:
 
-- `sad_multiplier` application
 - `RMV_*` frame-stat calculation
 - MVTools blob packing
 - frame-property output
@@ -117,7 +116,7 @@ Current limitations:
 
 - `res_scale=1.0` only, because the shader currently computes SAD from the same RGBS frames uploaded for RIFE inference.
 - Source dimensions must match inference dimensions.
-- Raw SAD must fit in 32-bit storage before `sad_multiplier` is applied.
+- Raw SAD must fit in 32-bit storage.
 - No automatic fallback.
 
 Expected effects:

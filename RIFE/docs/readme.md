@@ -29,6 +29,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - For interpolation, use the unmodified upstream RIFE plugin.
 - If you only need one direction, call `rmv.RIFEMV(...)` and use the output you need.
 - `meta_clip` has been removed from `rmv.RIFEMV`, `rmv.RIFEMVApprox2`, and `rmv.RIFEMVApprox3`. Existing scripts must stop passing `meta_clip`.
+- `sad_multiplier` has been removed from `rmv.RIFEMV`, `rmv.RIFEMVApprox2`, and `rmv.RIFEMVApprox3`. Apply any SAD scaling downstream instead.
 
 ## Important limitations
 
@@ -70,7 +71,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Accepted values:
   - `0` (`cpu`) reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
   - `1` (`gpu_flow_reduce`) performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
-  - `2` (`gpu_full`) performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD), then reads back compact vector arrays. CPU still applies `sad_multiplier`, computes stats, and packs MVTools blobs.
+  - `2` (`gpu_full`) performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD), then reads back compact vector arrays. CPU computes stats and packs MVTools blobs.
   `2` (`gpu_full`) is currently limited to source-sized inference (`res_scale=1.0`). There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
   String values are not accepted.
   See [GPU export modes](gpu-modes.md) for details and tradeoffs.
@@ -129,12 +130,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Set a higher value only if you explicitly want larger SAD values that track a higher-bit-depth scale.
   This also sets the exported MVTools `bitsPerSample` metadata so downstream filters scale `thsad` and `thscd1` against the same SAD range.
 
-- `sad_multiplier`
-  Positive multiplier applied to the final synthetic SAD values written into exported MVTools vectors.
-  Default: `1.0`.
-  This scales valid block SADs, invalid-frame sentinel SADs, and therefore all exported `RMV_*Sad*` frame properties.
-  It does not affect motion estimation or exported vector `x`/`y` components.
-
 - `abs_sad_clip_range`
   Controls how SAD values are written into the `Gray8` carrier pixels.
   Default: `0`.
@@ -188,7 +183,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, sad_multiplier=1.0, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -219,11 +214,6 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - `packed_cache_hits` and `packed_cache_misses` packed inference-frame cache reuse counters
 - `packed_build_ms` and `packed_wait_ms` packed-frame build and cache-contention wait time
 - `render_sad_mask_ms` time spent rasterizing the `Gray8` SAD carrier plane when `render_sad_mask=True`
-
-`sad_multiplier`:
-- positive float, default `1.0`
-- scales exported synthetic SAD values only
-- does not affect vector estimation or `RMV_AvgAbs*` properties
 
 ### Recommended usage
 

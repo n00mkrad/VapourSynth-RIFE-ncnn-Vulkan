@@ -310,7 +310,6 @@ struct MotionVectorConfig final {
     int blockReduce;
     float motionScaleX;
     float motionScaleY;
-    double sadMultiplier;
     int64_t invalidSad;
     MVAnalysisData backwardAnalysisData;
     MVAnalysisData forwardAnalysisData;
@@ -553,7 +552,6 @@ static void printMotionVectorInvocation(const char* const functionName, const in
     if (includeDelta)
         message << " delta=" << config.delta;
     message << " bits=" << config.bits
-            << " sad_multiplier=" << config.sadMultiplier
             << " abs_sad_clip_range=" << absSadClipRange
             << " render_sad_mask=" << renderSadMask
             << " matrix_in_s=" << matrixIn
@@ -1273,8 +1271,7 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
                                                    const bool useChroma, const int blockSizeX, const int blockSizeY,
                                                    const int overlapX, const int overlapY,
                                                    const int pel, const int delta, const int bits, const int hPadding,
-                                                   const int vPadding, const int blockReduce,
-                                                   const double sadMultiplier) {
+                                                   const int vPadding, const int blockReduce) {
     MotionVectorConfig config{};
     config.useChroma = useChroma;
     config.blockSizeX = blockSizeX;
@@ -1303,18 +1300,9 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
     config.blockReduce = blockReduce;
     config.motionScaleX = internalGeometry.motionScaleX;
     config.motionScaleY = internalGeometry.motionScaleY;
-    config.sadMultiplier = sadMultiplier;
-
-    const auto scaleLimit = static_cast<long double>((1LL << bits) - 1LL);
-    const auto blockArea = static_cast<long double>(blockSizeX) * blockSizeY;
-    const auto maxValidSad = blockArea * (useChroma ? 3.0L * scaleLimit : scaleLimit);
-    const auto maxInvalidSad = blockArea * static_cast<long double>(1LL << bits);
-    const auto maxScaledSad = std::max(maxValidSad, maxInvalidSad) * sadMultiplier;
-    if (maxScaledSad > static_cast<long double>(std::numeric_limits<int64_t>::max()) - 0.5L)
-        throw "sad_multiplier results in an overflowed SAD value";
 
     const auto invalidSad = static_cast<int64_t>(blockSizeX) * blockSizeY * (1LL << bits);
-    config.invalidSad = static_cast<int64_t>(static_cast<long double>(invalidSad) * sadMultiplier + 0.5L);
+    config.invalidSad = invalidSad;
 
     const auto& analysisVi = metadataVi ? *metadataVi : inputVi;
     const auto xRatioUV = 1 << analysisVi.format.subSamplingW;
@@ -1496,11 +1484,6 @@ static MotionVectorInternalGeometry createMotionVectorInternalGeometry(const int
     geometry.internalHPadding = std::max(0, scaleMotionVectorGeometryValue(hPadding, scaleX));
     geometry.internalVPadding = std::max(0, scaleMotionVectorGeometryValue(vPadding, scaleY));
     return geometry;
-}
-
-static void validateSadMultiplier(const double sadMultiplier) {
-    if (!std::isfinite(sadMultiplier) || sadMultiplier <= 0.0)
-        throw "sad_multiplier must be finite and greater than 0";
 }
 
 static void validateAbsSADClipRange(const int absSadClipRange) {
@@ -1758,7 +1741,6 @@ struct MotionVectorExportContext final {
     int blockReduce;
     float motionScaleX;
     float motionScaleY;
-    double sadMultiplier;
     int64_t invalidSad;
 };
 
@@ -1858,7 +1840,6 @@ struct SADContext final {
     int blockSizeY;
     bool useChroma;
     double maxSample;
-    double sadMultiplier;
     const float* currentR;
     const float* currentG;
     const float* currentB;
@@ -1996,7 +1977,6 @@ static SADContext makeSADContext(const VSFrame* current, const VSFrame* referenc
     context.blockSizeY = ctx.blockSizeY;
     context.useChroma = ctx.useChroma;
     context.maxSample = static_cast<double>((1ULL << ctx.bits) - 1ULL);
-    context.sadMultiplier = ctx.sadMultiplier;
     context.currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
     context.currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
     context.currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
@@ -2060,7 +2040,7 @@ static int64_t computeBlockSAD(const SADContext& context, const int pixelDx, con
             }
         }
 
-        return static_cast<int64_t>(static_cast<long double>(sad) * context.sadMultiplier + 0.5L);
+        return sad;
     }
 
     for (auto y = 0; y < context.blockSizeY; y++) {
@@ -2091,7 +2071,7 @@ static int64_t computeBlockSAD(const SADContext& context, const int pixelDx, con
         }
     }
 
-    return static_cast<int64_t>(static_cast<long double>(sad) * context.sadMultiplier + 0.5L);
+    return sad;
 }
 
 static const MVAnalysisData& getMotionVectorAnalysisData(const MotionVectorConfig& config, const bool backward) noexcept {
@@ -2327,7 +2307,6 @@ static MotionVectorExportContext createMotionVectorExportContext(const MotionVec
     ctx.blockReduce = config.blockReduce;
     ctx.motionScaleX = config.motionScaleX;
     ctx.motionScaleY = config.motionScaleY;
-    ctx.sadMultiplier = config.sadMultiplier;
     ctx.invalidSad = config.invalidSad;
     return ctx;
 }
@@ -2554,15 +2533,11 @@ static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuV
         return;
     }
 
-    const auto applySadMultiplier = [&](const uint32_t rawSad) {
-        return static_cast<int64_t>(static_cast<long double>(rawSad) * config.sadMultiplier + 0.5L);
-    };
-
     const auto* backwardGpuVectors = gpuVectors;
     const auto* forwardGpuVectors = gpuVectors + vectorCount;
     for (size_t i = 0; i < vectorCount; i++) {
-        backwardVectors[i] = { backwardGpuVectors[i].x, backwardGpuVectors[i].y, applySadMultiplier(backwardGpuVectors[i].rawSad) };
-        forwardVectors[i] = { forwardGpuVectors[i].x, forwardGpuVectors[i].y, applySadMultiplier(forwardGpuVectors[i].rawSad) };
+        backwardVectors[i] = { backwardGpuVectors[i].x, backwardGpuVectors[i].y, static_cast<int64_t>(backwardGpuVectors[i].rawSad) };
+        forwardVectors[i] = { forwardGpuVectors[i].x, forwardGpuVectors[i].y, static_cast<int64_t>(forwardGpuVectors[i].rawSad) };
     }
 
     packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
@@ -3421,9 +3396,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         mvRenderSadMask = !!vsapi->mapGetInt(in, "render_sad_mask", 0, &err);
         if (err)
             mvRenderSadMask = true;
-        auto mvSadMultiplier{ vsapi->mapGetFloat(in, "sad_multiplier", 0, &err) };
-        if (err)
-            mvSadMultiplier = 1.0;
         auto mvHPadding{ vsapi->mapGetIntSaturated(in, "hpad", 0, &err) };
         if (err)
             mvHPadding = 0;
@@ -3453,7 +3425,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 
         validateAndNormalizeFlowScale(flowScale);
         validateResScale(resScale);
-        validateSadMultiplier(mvSadMultiplier);
         validateAbsSADClipRange(mvAbsSADClipRange);
 
         const auto resolvedModel = resolveRIFEModel(modelPath);
@@ -3508,7 +3479,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const VSVideoInfo* metadataVi = sourceConverted ? &sourceVi : nullptr;
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, mvDelta,
-                                  mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
+                                  mvBits, mvHPadding, mvVPadding, mvBlockReduce);
         if (pairData->mvExportBackend == MotionVectorExportBackend::GpuFull)
             validateGpuFullMotionVectorBackend(pairData->mvConfig);
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
@@ -3743,9 +3714,6 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         mvRenderSadMask = !!vsapi->mapGetInt(in, "render_sad_mask", 0, &err);
         if (err)
             mvRenderSadMask = true;
-        auto mvSadMultiplier{ vsapi->mapGetFloat(in, "sad_multiplier", 0, &err) };
-        if (err)
-            mvSadMultiplier = 1.0;
         auto mvHPadding{ vsapi->mapGetIntSaturated(in, "hpad", 0, &err) };
         if (err)
             mvHPadding = 0;
@@ -3775,7 +3743,6 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
         validateAndNormalizeFlowScale(flowScale);
         validateResScale(resScale);
-        validateSadMultiplier(mvSadMultiplier);
         validateAbsSADClipRange(mvAbsSADClipRange);
 
         const auto resolvedModel = resolveRIFEModel(modelPath);
@@ -3828,12 +3795,12 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry,
                                                       mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, 1,
-                                                      mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
+                                                      mvBits, mvHPadding, mvVPadding, mvBlockReduce);
         for (auto delta = 1; delta <= maxDelta; delta++) {
             outputConfigs[delta] = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry,
                                                             mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                             mvOverlapX, mvOverlapY, mvPel, delta,
-                                                            mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvSadMultiplier);
+                                                            mvBits, mvHPadding, mvVPadding, mvBlockReduce);
         }
         printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
                                     MotionVectorExportBackend::Cpu, sharedPackedCacheEnabled, packedCacheMiB, mvSadStats, mvMotionStats, perfStats,
@@ -4027,7 +3994,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "render_sad_mask:int:opt;"
                              "sad_stats:int:opt;"
                              "motion_stats:int:opt;"
-                             "sad_multiplier:float:opt;"
                              "matrix_in_s:data:opt;"
                              "range_in_s:data:opt;"
                              "hpad:int:opt;"
@@ -4060,7 +4026,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "render_sad_mask:int:opt;"
                              "sad_stats:int:opt;"
                              "motion_stats:int:opt;"
-                             "sad_multiplier:float:opt;"
                              "matrix_in_s:data:opt;"
                              "range_in_s:data:opt;"
                              "hpad:int:opt;"
@@ -4093,7 +4058,6 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "render_sad_mask:int:opt;"
                              "sad_stats:int:opt;"
                              "motion_stats:int:opt;"
-                             "sad_multiplier:float:opt;"
                              "matrix_in_s:data:opt;"
                              "range_in_s:data:opt;"
                              "hpad:int:opt;"
