@@ -133,7 +133,27 @@ vec3 rgb = load_reference_rgb(x, y);
 return rgb.r * 0.2126f + rgb.g * 0.7152f + rgb.b * 0.0722f;
 }
 
-uint compute_sad(int pixel_dx, int pixel_dy, int block_x, int block_y)
+vec3 load_sad_current_rgb(int x, int y, bool swap_images)
+{
+return swap_images ? load_reference_rgb(x, y) : load_current_rgb(x, y);
+}
+
+vec3 load_sad_reference_rgb(int x, int y, bool swap_images)
+{
+return swap_images ? load_current_rgb(x, y) : load_reference_rgb(x, y);
+}
+
+float load_sad_current_luma(int x, int y, bool swap_images)
+{
+return swap_images ? load_reference_luma(x, y) : load_current_luma(x, y);
+}
+
+float load_sad_reference_luma(int x, int y, bool swap_images)
+{
+return swap_images ? load_current_luma(x, y) : load_reference_luma(x, y);
+}
+
+uint compute_sad(int pixel_dx, int pixel_dy, int block_x, int block_y, bool swap_images)
 {
 uint sad = 0;
 int current_x0 = block_x;
@@ -155,8 +175,8 @@ for (int y = 0; y < p.block_size_y; y++)
 {
 for (int x = 0; x < p.block_size_x; x++)
 {
-vec3 current_rgb = load_current_rgb(current_x0 + x, current_y0 + y);
-vec3 reference_rgb = load_reference_rgb(reference_x0 + x, reference_y0 + y);
+vec3 current_rgb = load_sad_current_rgb(current_x0 + x, current_y0 + y, swap_images);
+vec3 reference_rgb = load_sad_reference_rgb(reference_x0 + x, reference_y0 + y, swap_images);
 vec3 diff = abs(current_rgb - reference_rgb);
 sad += round_positive((diff.r + diff.g + diff.b) * p.max_sample);
 }
@@ -168,8 +188,8 @@ for (int y = 0; y < p.block_size_y; y++)
 {
 for (int x = 0; x < p.block_size_x; x++)
 {
-float current_luma = load_current_luma(current_x0 + x, current_y0 + y);
-float reference_luma = load_reference_luma(reference_x0 + x, reference_y0 + y);
+float current_luma = load_sad_current_luma(current_x0 + x, current_y0 + y, swap_images);
+float reference_luma = load_sad_reference_luma(reference_x0 + x, reference_y0 + y, swap_images);
 sad += round_positive(abs(current_luma - reference_luma) * p.max_sample);
 }
 }
@@ -187,15 +207,15 @@ int current_x = clampi(block_x + x, p.image_w);
 int reference_x = clampi(current_x + pixel_dx, p.image_w);
 if (p.use_chroma != 0)
 {
-vec3 current_rgb = load_current_rgb(current_x, current_y);
-vec3 reference_rgb = load_reference_rgb(reference_x, reference_y);
+vec3 current_rgb = load_sad_current_rgb(current_x, current_y, swap_images);
+vec3 reference_rgb = load_sad_reference_rgb(reference_x, reference_y, swap_images);
 vec3 diff = abs(current_rgb - reference_rgb);
 sad += round_positive((diff.r + diff.g + diff.b) * p.max_sample);
 }
 else
 {
-float current_luma = load_current_luma(current_x, current_y);
-float reference_luma = load_reference_luma(reference_x, reference_y);
+float current_luma = load_sad_current_luma(current_x, current_y, swap_images);
+float reference_luma = load_sad_reference_luma(reference_x, reference_y, swap_images);
 sad += round_positive(abs(current_luma - reference_luma) * p.max_sample);
 }
 }
@@ -204,7 +224,7 @@ sad += round_positive(abs(current_luma - reference_luma) * p.max_sample);
 return sad;
 }
 
-uvec4 make_vector(float flow_x, float flow_y, int block_x, int block_y)
+uvec4 make_vector(float flow_x, float flow_y, int block_x, int block_y, bool swap_sad_images)
 {
 int x = round_away(-2.f * flow_x * p.motion_scale_x * float(p.pel));
 int y = round_away(-2.f * flow_y * p.motion_scale_y * float(p.pel));
@@ -212,7 +232,7 @@ x = clamp_mv_component(x, block_x, p.block_size_x, p.image_w, p.pad_x);
 y = clamp_mv_component(y, block_y, p.block_size_y, p.image_h, p.pad_y);
 int pixel_dx = round_away(float(x) / float(p.pel));
 int pixel_dy = round_away(float(y) / float(p.pel));
-uint sad = compute_sad(pixel_dx, pixel_dy, block_x, block_y);
+uint sad = compute_sad(pixel_dx, pixel_dy, block_x, block_y, swap_sad_images);
 return uvec4(uint(x), uint(y), sad, 0u);
 }
 
@@ -231,7 +251,7 @@ int internal_block_x = bx * p.internal_step_x - p.internal_pad_x;
 int internal_block_y = by * p.internal_step_y - p.internal_pad_y;
 vec4 reduced = reduce_flow_block(internal_block_x, internal_block_y);
 
-vector_blob_data[block_index] = make_vector(reduced.x, reduced.y, block_x, block_y);
-vector_blob_data[block_count + block_index] = make_vector(reduced.z, reduced.w, block_x, block_y);
+vector_blob_data[block_index] = make_vector(reduced.x, reduced.y, block_x, block_y, false);
+vector_blob_data[block_count + block_index] = make_vector(reduced.z, reduced.w, block_x, block_y, true);
 }
 )glsl";
