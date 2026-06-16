@@ -22,6 +22,9 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `rmv.RIFEMVApprox3(...)`
   Returns approximate vectors for deltas 1, 2, and 3 by composing adjacent motions.
 
+- `rmv.CropGrid(...)`
+  Crops MVTools-compatible vector clips and matching `mv.Super` clips on the vector block-step grid.
+
 ## Important limitations
 
 - Motion-vector export supports `rife-v3.1`, `rife-v3.9`, and `rife-v4.2+` model families.
@@ -33,7 +36,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - If `abs_sad_clip_range > 0`, the rendered carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
 - Frames without a valid reference still export invalid MVTools vectors as before. When the SAD mask is rendered, relative mode makes it solid `255` and absolute mode shows the clipped sentinel SAD, which will usually also be `255`.
 - Exported motion-vector frames can optionally include SAD summary frame properties `RMV_AvgSad`, `RMV_MaxSad`, and `RMV_MinSad` (controlled by `sad_stats`), and motion-summary frame properties `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` (controlled by `motion_stats`). `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
-- Do not resize or colorspace-convert the exported vector clips after creation.
+- Do not resize or colorspace-convert the exported vector clips after creation. Use `rmv.CropGrid(...)` when a vector clip and matching `mv.Super` clip need a metadata-aware crop.
 
 ## Motion-vector arguments
 
@@ -166,6 +169,40 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 
 - `chroma`
   If enabled, synthetic SAD includes all RGB channels. Otherwise it uses luma only.
+
+## `rmv.CropGrid`
+
+`CropGrid` crops MVTools-compatible vector clips and matching `mv.Super` clips without leaving stale dimensions in their frame properties.
+
+### Signature
+
+```python
+cropped = core.rmv.CropGrid(clip, left=0, right=0, top=0, bottom=0, vectors=None)
+```
+
+`left`, `right`, `top`, and `bottom` are not pixel counts. They are counts of vector block steps:
+
+```text
+step_x = nBlkSizeX - nOverlapX
+step_y = nBlkSizeY - nOverlapY
+```
+
+For example, with `blksize_x=16` and `overlap_x=8`, `left=2` removes two vector columns and crops 16 pixels from the carrier clip.
+
+For vector clips, pass the vector clip as `clip`:
+
+```python
+mvbw_crop = core.rmv.CropGrid(mvbw, left=1, right=1)
+mvfw_crop = core.rmv.CropGrid(mvfw, left=1, right=1)
+```
+
+For `mv.Super` clips, pass the Super clip as `clip` and a matching vector clip as `vectors` so `CropGrid` can derive the block step. The vector clip may be either the original matching vector clip or the vector clip after applying the same `CropGrid` crop:
+
+```python
+sup_crop = core.rmv.CropGrid(sup, left=1, right=1, vectors=mvfw)
+```
+
+`CropGrid` v1 supports single-level vector clips, which matches the output from this plugin's `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3` functions. Native multi-level MVTools vector clips are rejected.
 
 ## `rmv.RIFEMV`
 
