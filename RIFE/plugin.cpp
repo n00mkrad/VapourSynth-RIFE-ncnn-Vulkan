@@ -1821,6 +1821,7 @@ struct RIFEMVApproxOutputData final {
 enum class CropGridMode : uint8_t {
     Vector,
     Super,
+    Plain,
 };
 
 struct MVToolsSuperData final {
@@ -2956,6 +2957,7 @@ static bool cropMotionVectorGrid(const std::vector<MVToolsVector>& srcVectors, c
         return false;
 
     dstVectors.resize(static_cast<size_t>(dstBlkX) * dstBlkY);
+    const auto invalidSad = static_cast<int64_t>(dstAnalysisData.nBlkSizeX) * dstAnalysisData.nBlkSizeY * (1LL << dstAnalysisData.bitsPerSample);
     for (auto y = 0; y < dstBlkY; y++) {
         const auto* srcRow = srcVectors.data() + static_cast<size_t>(top + y) * srcAnalysisData.nBlkX + left;
         auto* dstRow = dstVectors.data() + static_cast<size_t>(y) * dstBlkX;
@@ -2965,10 +2967,14 @@ static bool cropMotionVectorGrid(const std::vector<MVToolsVector>& srcVectors, c
             auto& vector = dstRow[x];
             const auto blockX = x * stepX - dstAnalysisData.nHPadding;
             const auto blockY = y * stepY - dstAnalysisData.nVPadding;
-            vector.x = clampMotionVectorComponent(vector.x, dstAnalysisData.nPel, blockX, dstAnalysisData.nBlkSizeX,
-                                                  dstAnalysisData.nWidth, dstAnalysisData.nHPadding);
-            vector.y = clampMotionVectorComponent(vector.y, dstAnalysisData.nPel, blockY, dstAnalysisData.nBlkSizeY,
-                                                  dstAnalysisData.nHeight, dstAnalysisData.nVPadding);
+            const auto clampedX = clampMotionVectorComponent(vector.x, dstAnalysisData.nPel, blockX, dstAnalysisData.nBlkSizeX,
+                                                             dstAnalysisData.nWidth, dstAnalysisData.nHPadding);
+            const auto clampedY = clampMotionVectorComponent(vector.y, dstAnalysisData.nPel, blockY, dstAnalysisData.nBlkSizeY,
+                                                             dstAnalysisData.nHeight, dstAnalysisData.nVPadding);
+            if (clampedX != vector.x || clampedY != vector.y)
+                vector.sad = std::max(vector.sad, invalidSad); // Keep references in bounds without weighting altered edge vectors.
+            vector.x = clampedX;
+            vector.y = clampedY;
         }
     }
 
@@ -3058,6 +3064,13 @@ static const VSFrame* VS_CC cropGridGetFrame(int n, int activationReason, void* 
         auto src = vsapi->getFrameFilter(n, d->node, frameCtx);
 
         try {
+            if (d->mode == CropGridMode::Plain) {
+                auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, src, core);
+                copyCroppedVideoFramePixels(src, dst, d->cropLeftPx, d->cropTopPx, vsapi);
+                vsapi->freeFrame(src);
+                return dst;
+            }
+
             if (d->mode == CropGridMode::Super) {
                 auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
                 copyCroppedSuperFrame(src, dst, *d, vsapi);
@@ -3753,6 +3766,144 @@ static void configureCropGridStepData(CropGridData& data, const MVAnalysisData& 
     data.cropBottomPx = data.bottom * data.stepY;
 }
 
+static bool hasCropGridWork(const CropGridData& data) noexcept {
+    return data.cropLeftPx || data.cropRightPx || data.cropTopPx || data.cropBottomPx;
+}
+
+static bool isCompatibleCropGridAnalysisData(const MVAnalysisData& base, const MVAnalysisData& other) noexcept {
+    return other.nLvCount == 1 &&
+           base.nBlkSizeX == other.nBlkSizeX &&
+           base.nBlkSizeY == other.nBlkSizeY &&
+           base.nPel == other.nPel &&
+           base.nWidth == other.nWidth &&
+           base.nHeight == other.nHeight &&
+           base.nOverlapX == other.nOverlapX &&
+           base.nOverlapY == other.nOverlapY &&
+           base.nBlkX == other.nBlkX &&
+           base.nBlkY == other.nBlkY &&
+           base.bitsPerSample == other.bitsPerSample &&
+           base.yRatioUV == other.yRatioUV &&
+           base.xRatioUV == other.xRatioUV &&
+           base.nHPadding == other.nHPadding &&
+           base.nVPadding == other.nVPadding;
+}
+
+static int cropGridPixelsToSteps(const int pixels, const int step, const char* name) {
+    if (pixels % step != 0)
+        throw std::runtime_error(std::string(name) + " must be a multiple of the vector grid step");
+    return pixels / step;
+}
+
+static VSNode* createCropGridFilterNode(std::unique_ptr<CropGridData> data, const char* name,
+                                        VSCore* core, const VSAPI* vsapi) {
+    VSFilterDependency deps[]{ { data->node, rpStrictSpatial } };
+    auto node = vsapi->createVideoFilter2(name, &data->vi, cropGridGetFrame, cropGridFree,
+                                          fmParallel, deps, 1, data.get(), core);
+    if (!node) {
+        vsapi->freeNode(data->node);
+        data->node = nullptr;
+        return nullptr;
+    }
+
+    data.release();
+    return node;
+}
+
+static std::unique_ptr<CropGridData> createCropGridVectorData(VSNode* node, const VSVideoInfo& vi,
+                                                              const MVAnalysisData& analysisData,
+                                                              const int left, const int right,
+                                                              const int top, const int bottom,
+                                                              const VSAPI* vsapi) {
+    auto data{ std::make_unique<CropGridData>() };
+    data->node = node;
+    data->vi = vi;
+    data->mode = CropGridMode::Vector;
+    data->left = left;
+    data->right = right;
+    data->top = top;
+    data->bottom = bottom;
+    configureCropGridData(*data, analysisData);
+    if (data->vi.width != analysisData.nWidth || data->vi.height != analysisData.nHeight)
+        throw "vector carrier dimensions do not match MVTools vector metadata";
+    validateCropSubsamplingAlignment(data->vi, data->cropLeftPx, data->cropRightPx, data->cropTopPx, data->cropBottomPx);
+    data->vi.width = data->outputSourceWidth;
+    data->vi.height = data->outputSourceHeight;
+    return data;
+}
+
+static std::unique_ptr<CropGridData> createCropGridSuperData(VSNode* node, const VSVideoInfo& vi,
+                                                             const MVToolsSuperData& super,
+                                                             const MVAnalysisData& analysisData,
+                                                             const int left, const int right,
+                                                             const int top, const int bottom,
+                                                             const VSAPI* vsapi) {
+    auto data{ std::make_unique<CropGridData>() };
+    data->node = node;
+    data->vi = vi;
+    data->mode = CropGridMode::Super;
+    data->super = super;
+    data->left = left;
+    data->right = right;
+    data->top = top;
+    data->bottom = bottom;
+    configureCropGridStepData(*data, analysisData);
+    const auto superSourceWidth = data->vi.width - data->super.hpad * 2;
+    const auto superSourceHeight = data->super.height;
+    const auto vectorsMatchOriginal = superSourceWidth == analysisData.nWidth && superSourceHeight == analysisData.nHeight;
+    const auto vectorsMatchCropped = superSourceWidth == analysisData.nWidth + data->cropLeftPx + data->cropRightPx &&
+                                     superSourceHeight == analysisData.nHeight + data->cropTopPx + data->cropBottomPx;
+    if (!vectorsMatchOriginal && !vectorsMatchCropped)
+        throw "Super clip dimensions do not match vector metadata";
+    if (data->super.pel != analysisData.nPel)
+        throw "Super pel does not match vector metadata";
+    if (data->super.hpad != analysisData.nHPadding || data->super.vpad != analysisData.nVPadding)
+        throw "Super padding does not match vector metadata";
+    if (data->super.levels <= 0)
+        throw "Super clip has invalid level metadata";
+
+    data->sourceWidth = superSourceWidth;
+    data->sourceHeight = superSourceHeight;
+    data->outputSourceWidth = data->sourceWidth - data->cropLeftPx - data->cropRightPx;
+    data->outputSourceHeight = data->sourceHeight - data->cropTopPx - data->cropBottomPx;
+    if (data->outputSourceWidth <= 0 || data->outputSourceHeight <= 0)
+        throw "crop removes the entire clip";
+
+    validateCropSubsamplingAlignment(data->vi, data->cropLeftPx, data->cropRightPx, data->cropTopPx, data->cropBottomPx);
+    const auto xRatioUV = 1 << data->vi.format.subSamplingW;
+    const auto yRatioUV = 1 << data->vi.format.subSamplingH;
+    data->vi.width = cropGridSuperWidth(data->outputSourceWidth, data->super.hpad, xRatioUV);
+    data->vi.height = cropGridSuperHeight(data->outputSourceHeight, data->super.levels, data->super.pel,
+                                          data->super.vpad, data->vi.width, yRatioUV);
+    return data;
+}
+
+static std::unique_ptr<CropGridData> createCropGridPlainData(VSNode* node, const VSVideoInfo& vi,
+                                                             const int sourceWidth, const int sourceHeight,
+                                                             const int cropLeftPx, const int cropRightPx,
+                                                             const int cropTopPx, const int cropBottomPx) {
+    auto data{ std::make_unique<CropGridData>() };
+    data->node = node;
+    data->vi = vi;
+    data->mode = CropGridMode::Plain;
+    data->cropLeftPx = cropLeftPx;
+    data->cropRightPx = cropRightPx;
+    data->cropTopPx = cropTopPx;
+    data->cropBottomPx = cropBottomPx;
+    data->sourceWidth = sourceWidth;
+    data->sourceHeight = sourceHeight;
+    data->outputSourceWidth = sourceWidth - cropLeftPx - cropRightPx;
+    data->outputSourceHeight = sourceHeight - cropTopPx - cropBottomPx;
+    if (data->vi.width != sourceWidth || data->vi.height != sourceHeight)
+        throw "clip dimensions do not match vector metadata";
+    if (data->outputSourceWidth <= 0 || data->outputSourceHeight <= 0)
+        throw "crop removes the entire clip";
+
+    validateCropSubsamplingAlignment(data->vi, data->cropLeftPx, data->cropRightPx, data->cropTopPx, data->cropBottomPx);
+    data->vi.width = data->outputSourceWidth;
+    data->vi.height = data->outputSourceHeight;
+    return data;
+}
+
 static void VS_CC cropGridCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
     auto data{ std::make_unique<CropGridData>() };
     VSNode* vectorsNode{};
@@ -3862,6 +4013,218 @@ static void VS_CC cropGridCreate(const VSMap* in, VSMap* out, [[maybe_unused]] v
         vsapi->freeFrame(vectorFrame);
         vsapi->freeNode(vectorsNode);
         vsapi->freeNode(data->node);
+    }
+}
+
+static void freeCropGridNodeList(std::vector<VSNode*>& nodes, const VSAPI* vsapi) {
+    for (auto*& node : nodes) {
+        if (node)
+            vsapi->freeNode(node);
+        node = nullptr;
+    }
+}
+
+static void VS_CC cropGridsCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
+    std::vector<VSNode*> bwdNodes;
+    std::vector<VSNode*> fwdNodes;
+    std::vector<VSNode*> bwdOutputNodes;
+    std::vector<VSNode*> fwdOutputNodes;
+    VSNode* superNode{};
+    VSNode* clipNode{};
+    VSNode* superOutputNode{};
+    VSNode* clipOutputNode{};
+    const VSFrame* metadataFrame{};
+
+    try {
+        const auto bwdCount = vsapi->mapNumElements(in, "bwds");
+        const auto fwdCount = vsapi->mapNumElements(in, "fwds");
+        if (bwdCount <= 0)
+            throw "bwds must contain at least one vector clip";
+        if (fwdCount <= 0)
+            throw "fwds must contain at least one vector clip";
+        if (bwdCount != fwdCount)
+            throw "bwds and fwds must contain the same number of vector clips";
+
+        bwdNodes.resize(bwdCount);
+        fwdNodes.resize(fwdCount);
+        for (auto i = 0; i < bwdCount; i++)
+            bwdNodes[i] = vsapi->mapGetNode(in, "bwds", i, nullptr);
+        for (auto i = 0; i < fwdCount; i++)
+            fwdNodes[i] = vsapi->mapGetNode(in, "fwds", i, nullptr);
+
+        int err{};
+        auto leftValue = vsapi->mapGetIntSaturated(in, "left", 0, &err);
+        if (err)
+            leftValue = 0;
+        auto rightValue = vsapi->mapGetIntSaturated(in, "right", 0, &err);
+        if (err)
+            rightValue = 0;
+        auto topValue = vsapi->mapGetIntSaturated(in, "top", 0, &err);
+        if (err)
+            topValue = 0;
+        auto bottomValue = vsapi->mapGetIntSaturated(in, "bottom", 0, &err);
+        if (err)
+            bottomValue = 0;
+        if (leftValue < 0 || rightValue < 0 || topValue < 0 || bottomValue < 0)
+            throw "crop values must be non-negative";
+
+        auto gridUnits = !!vsapi->mapGetInt(in, "grid", 0, &err);
+        if (err)
+            gridUnits = false;
+
+        std::array<char, 1024> errorMsg{};
+        metadataFrame = vsapi->getFrame(0, bwdNodes[0], errorMsg.data(), static_cast<int>(errorMsg.size()));
+        if (!metadataFrame)
+            throw std::runtime_error(std::string("failed to retrieve first bwds frame: ") + errorMsg.data());
+
+        MVAnalysisData baseAnalysisData{};
+        if (!readMVAnalysisData(vsapi->getFramePropertiesRO(metadataFrame), baseAnalysisData, vsapi))
+            throw "first bwd vector clip is missing MVTools vector metadata";
+        validateCropGridAnalysisData(baseAnalysisData);
+        vsapi->freeFrame(metadataFrame);
+        metadataFrame = nullptr;
+
+        const auto stepX = baseAnalysisData.nBlkSizeX - baseAnalysisData.nOverlapX;
+        const auto stepY = baseAnalysisData.nBlkSizeY - baseAnalysisData.nOverlapY;
+        if (stepX <= 0 || stepY <= 0)
+            throw "invalid MVTools block step metadata";
+
+        const auto left = gridUnits ? leftValue : cropGridPixelsToSteps(leftValue, stepX, "left");
+        const auto right = gridUnits ? rightValue : cropGridPixelsToSteps(rightValue, stepX, "right");
+        const auto top = gridUnits ? topValue : cropGridPixelsToSteps(topValue, stepY, "top");
+        const auto bottom = gridUnits ? bottomValue : cropGridPixelsToSteps(bottomValue, stepY, "bottom");
+        const auto cropLeftPx = left * stepX;
+        const auto cropRightPx = right * stepX;
+        const auto cropTopPx = top * stepY;
+        const auto cropBottomPx = bottom * stepY;
+
+        const auto createVectorOutputs = [&](std::vector<VSNode*>& nodes, std::vector<VSNode*>& outputs, const char* label) {
+            outputs.reserve(nodes.size());
+            for (auto i = 0; i < static_cast<int>(nodes.size()); i++) {
+                metadataFrame = vsapi->getFrame(0, nodes[i], errorMsg.data(), static_cast<int>(errorMsg.size()));
+                if (!metadataFrame)
+                    throw std::runtime_error(std::string("failed to retrieve ") + label + " frame metadata: " + errorMsg.data());
+
+                MVAnalysisData analysisData{};
+                if (!readMVAnalysisData(vsapi->getFramePropertiesRO(metadataFrame), analysisData, vsapi))
+                    throw std::runtime_error(std::string(label) + " vector clip is missing MVTools vector metadata");
+                vsapi->freeFrame(metadataFrame);
+                metadataFrame = nullptr;
+
+                if (!isCompatibleCropGridAnalysisData(baseAnalysisData, analysisData))
+                    throw std::runtime_error(std::string("all ") + label + " vector clips must use the same source geometry and vector grid");
+
+                const auto vi = *vsapi->getVideoInfo(nodes[i]);
+                auto data = createCropGridVectorData(nodes[i], vi, analysisData, left, right, top, bottom, vsapi);
+                if (hasCropGridWork(*data)) {
+                    nodes[i] = nullptr;
+                    auto node = createCropGridFilterNode(std::move(data), "CropGridsVector", core, vsapi);
+                    if (!node)
+                        throw std::runtime_error(std::string("failed to create ") + label + " crop output");
+                    outputs.push_back(node);
+                } else {
+                    outputs.push_back(vsapi->addNodeRef(nodes[i]));
+                }
+            }
+        };
+
+        createVectorOutputs(bwdNodes, bwdOutputNodes, "bwd");
+        createVectorOutputs(fwdNodes, fwdOutputNodes, "fwd");
+
+        superNode = vsapi->mapGetNode(in, "super", 0, &err);
+        if (err)
+            superNode = nullptr;
+        if (superNode) {
+            const auto superVi = *vsapi->getVideoInfo(superNode);
+            if (!vsh::isConstantVideoFormat(&superVi))
+                throw "super clip must have constant dimensions and format";
+
+            metadataFrame = vsapi->getFrame(0, superNode, errorMsg.data(), static_cast<int>(errorMsg.size()));
+            if (!metadataFrame)
+                throw std::runtime_error(std::string("failed to retrieve first super frame: ") + errorMsg.data());
+
+            MVToolsSuperData superData{};
+            if (!readMVToolsSuperData(vsapi->getFramePropertiesRO(metadataFrame), superData, vsapi))
+                throw "super clip is missing Super metadata on frame 0";
+            vsapi->freeFrame(metadataFrame);
+            metadataFrame = nullptr;
+
+            auto data = createCropGridSuperData(superNode, superVi, superData, baseAnalysisData, left, right, top, bottom, vsapi);
+            if (hasCropGridWork(*data)) {
+                superNode = nullptr;
+                auto node = createCropGridFilterNode(std::move(data), "CropGridsSuper", core, vsapi);
+                if (!node)
+                    throw "failed to create Super crop output";
+                superOutputNode = node;
+            } else {
+                superOutputNode = vsapi->addNodeRef(superNode);
+            }
+        }
+
+        clipNode = vsapi->mapGetNode(in, "clip", 0, &err);
+        if (err)
+            clipNode = nullptr;
+        if (clipNode) {
+            const auto clipVi = *vsapi->getVideoInfo(clipNode);
+            if (!vsh::isConstantVideoFormat(&clipVi))
+                throw "clip must have constant dimensions and format";
+
+            auto data = createCropGridPlainData(clipNode, clipVi, baseAnalysisData.nWidth, baseAnalysisData.nHeight,
+                                                cropLeftPx, cropRightPx, cropTopPx, cropBottomPx);
+            if (hasCropGridWork(*data)) {
+                clipNode = nullptr;
+                auto node = createCropGridFilterNode(std::move(data), "CropGridsClip", core, vsapi);
+                if (!node)
+                    throw "failed to create clip crop output";
+                clipOutputNode = node;
+            } else {
+                clipOutputNode = vsapi->addNodeRef(clipNode);
+            }
+        }
+
+        for (auto*& node : bwdOutputNodes) {
+            vsapi->mapConsumeNode(out, "bwds", node, maAppend);
+            node = nullptr;
+        }
+        for (auto*& node : fwdOutputNodes) {
+            vsapi->mapConsumeNode(out, "fwds", node, maAppend);
+            node = nullptr;
+        }
+        if (superOutputNode) {
+            vsapi->mapConsumeNode(out, "super", superOutputNode, maReplace);
+            superOutputNode = nullptr;
+        }
+        if (clipOutputNode) {
+            vsapi->mapConsumeNode(out, "clip", clipOutputNode, maReplace);
+            clipOutputNode = nullptr;
+        }
+
+        freeCropGridNodeList(bwdNodes, vsapi);
+        freeCropGridNodeList(fwdNodes, vsapi);
+        vsapi->freeNode(superNode);
+        vsapi->freeNode(clipNode);
+    } catch (const std::exception& error) {
+        vsapi->mapSetError(out, ("CropGrids: "s + error.what()).c_str());
+        vsapi->freeFrame(metadataFrame);
+        freeCropGridNodeList(bwdOutputNodes, vsapi);
+        freeCropGridNodeList(fwdOutputNodes, vsapi);
+        freeCropGridNodeList(bwdNodes, vsapi);
+        freeCropGridNodeList(fwdNodes, vsapi);
+        vsapi->freeNode(superOutputNode);
+        vsapi->freeNode(clipOutputNode);
+        vsapi->freeNode(superNode);
+        vsapi->freeNode(clipNode);
+    } catch (const char* error) {
+        vsapi->mapSetError(out, ("CropGrids: "s + error).c_str());
+        vsapi->freeFrame(metadataFrame);
+        freeCropGridNodeList(bwdOutputNodes, vsapi);
+        freeCropGridNodeList(fwdOutputNodes, vsapi);
+        freeCropGridNodeList(bwdNodes, vsapi);
+        freeCropGridNodeList(fwdNodes, vsapi);
+        vsapi->freeNode(superOutputNode);
+        vsapi->freeNode(clipOutputNode);
+        vsapi->freeNode(superNode);
+        vsapi->freeNode(clipNode);
     }
 }
 
@@ -4542,6 +4905,22 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "vectors:vnode:opt;",
                              "clip:vnode;",
                              cropGridCreate, nullptr, plugin);
+
+    vspapi->registerFunction("CropGrids",
+                             "bwds:vnode[];"
+                             "fwds:vnode[];"
+                             "left:int:opt;"
+                             "right:int:opt;"
+                             "top:int:opt;"
+                             "bottom:int:opt;"
+                             "super:vnode:opt;"
+                             "clip:vnode:opt;"
+                             "grid:int:opt;",
+                             "bwds:vnode[];"
+                             "fwds:vnode[];"
+                             "super:vnode:opt;"
+                             "clip:vnode:opt;",
+                             cropGridsCreate, nullptr, plugin);
 
     vspapi->registerFunction("RIFEMV",
                              "clip:vnode;"
