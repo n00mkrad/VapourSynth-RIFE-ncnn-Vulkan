@@ -3815,8 +3815,18 @@ static void VS_CC cropGridCreate(const VSMap* in, VSMap* out, [[maybe_unused]] v
             const auto vectorsMatchOriginal = superSourceWidth == analysisData.nWidth && superSourceHeight == analysisData.nHeight;
             const auto vectorsMatchCropped = superSourceWidth == analysisData.nWidth + data->cropLeftPx + data->cropRightPx &&
                                              superSourceHeight == analysisData.nHeight + data->cropTopPx + data->cropBottomPx;
-            if (!vectorsMatchOriginal && !vectorsMatchCropped)
-                throw "Super clip dimensions do not match vector metadata";
+            if (!vectorsMatchOriginal && !vectorsMatchCropped) {
+                const auto expectedCroppedWidth = analysisData.nWidth + data->cropLeftPx + data->cropRightPx;
+                const auto expectedCroppedHeight = analysisData.nHeight + data->cropTopPx + data->cropBottomPx;
+                throw std::runtime_error("Super clip dimensions do not match vector metadata: super carrier=" +
+                                         std::to_string(data->vi.width) + "x" + std::to_string(data->vi.height) +
+                                         ", super source=" + std::to_string(superSourceWidth) + "x" + std::to_string(superSourceHeight) +
+                                         ", vector source=" + std::to_string(analysisData.nWidth) + "x" + std::to_string(analysisData.nHeight) +
+                                         ", expected super source=" + std::to_string(analysisData.nWidth) + "x" + std::to_string(analysisData.nHeight) +
+                                         " or " + std::to_string(expectedCroppedWidth) + "x" + std::to_string(expectedCroppedHeight) +
+                                         " from crop L/R/T/B=" + std::to_string(data->cropLeftPx) + "/" + std::to_string(data->cropRightPx) +
+                                         "/" + std::to_string(data->cropTopPx) + "/" + std::to_string(data->cropBottomPx));
+            }
             if (data->super.pel != analysisData.nPel)
                 throw "Super pel does not match vector metadata";
             if (data->super.hpad != analysisData.nHPadding || data->super.vpad != analysisData.nVPadding)
