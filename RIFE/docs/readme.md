@@ -25,9 +25,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `rmv.CropGrid(...)`
   Crops MVTools-compatible vector clips and matching `mv.Super` clips on the vector block-step grid.
 
-- `rmv.CropGrids(...)`
-  Crops multiple vector clips plus optional matching `mv.Super` and source clips in one call.
-
 ## Important limitations
 
 - Motion-vector export supports `rife-v3.1`, `rife-v3.9`, and `rife-v4.2+` model families.
@@ -206,46 +203,6 @@ sup_crop = core.rmv.CropGrid(sup, left=1, right=1, vectors=mvfw)
 ```
 
 `CropGrid` v1 supports single-level vector clips, which matches the output from this plugin's `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3` functions. Native multi-level MVTools vector clips are rejected.
-
-## `rmv.CropGrids`
-
-`CropGrids` is a wrapper for cropping matching MVTools workflow clips together. It accepts separate backward and forward vector clip lists, defaults to pixel crop units, and returns an error when the requested pixel crop is not aligned to the vector grid step.
-
-### Signature
-
-```python
-cropped = core.rmv.CropGrids(bwds, fwds, left=0, right=0, top=0, bottom=0, super=sup, clip=src, grid=False)
-```
-
-`CropGrids` returns a multi-key result map. Do not unpack it directly, because Python will iterate the map keys. Read the output clips by key:
-
-```python
-bwds = cropped["bwds"]
-fwds = cropped["fwds"]
-sup = cropped["super"]
-src = cropped["clip"]
-```
-
-Example:
-
-```python
-cropped = core.rmv.CropGrids(bwds, fwds, top=16, bottom=16, super=sup, clip=src)
-bwds = cropped["bwds"]
-fwds = cropped["fwds"]
-sup = cropped["super"]
-src = cropped["clip"]
-out = core.mv.Degrain1(src, sup, bwds[0], fwds[0])
-```
-
-The crop values are pixels by default. For example, with `blksize_y=8` and `overlap_y=4`, `top=16` removes four vector rows because the vertical step is `4`.
-
-Set `grid=True` to use the same step-count units as `CropGrid`:
-
-```python
-cropped = core.rmv.CropGrids(bwds, fwds, top=4, bottom=4, super=sup, clip=src, grid=True)
-```
-
-All backward and forward vector clips in one call must share the same source geometry, block size, overlap, `pel`, padding, chroma ratios, bit depth, and single-level vector layout.
 
 ## `rmv.RIFEMV`
 
