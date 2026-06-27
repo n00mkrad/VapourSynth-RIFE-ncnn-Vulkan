@@ -7,7 +7,7 @@ static const char rife_mv_full_comp_data[] = R"glsl(#version 450
 layout (binding = 0) readonly buffer flow_blob { sfpvec4 flow_blob_data[]; };
 layout (binding = 1) readonly buffer current_blob { float current_blob_data[]; };
 layout (binding = 2) readonly buffer reference_blob { float reference_blob_data[]; };
-layout (binding = 3) writeonly buffer vector_blob { uvec4 vector_blob_data[]; };
+layout (binding = 3) writeonly buffer vector_blob { uint vector_blob_data[]; };
 
 layout (push_constant) uniform parameter
 {
@@ -39,7 +39,7 @@ int internal_pad_y;
 int pel;
 int reduce_mode;
 int use_chroma;
-int reserved1;
+int output_words_per_vector;
 
 float motion_scale_x;
 float motion_scale_y;
@@ -224,7 +224,7 @@ sad += round_positive(abs(current_luma - reference_luma) * p.max_sample);
 return sad;
 }
 
-uvec4 make_vector(float flow_x, float flow_y, int block_x, int block_y, bool swap_sad_images)
+uvec3 make_vector(float flow_x, float flow_y, int block_x, int block_y, bool swap_sad_images)
 {
 int x = round_away(-2.f * flow_x * p.motion_scale_x * float(p.pel));
 int y = round_away(-2.f * flow_y * p.motion_scale_y * float(p.pel));
@@ -233,7 +233,24 @@ y = clamp_mv_component(y, block_y, p.block_size_y, p.image_h, p.pad_y);
 int pixel_dx = round_away(float(x) / float(p.pel));
 int pixel_dy = round_away(float(y) / float(p.pel));
 uint sad = compute_sad(pixel_dx, pixel_dy, block_x, block_y, swap_sad_images);
-return uvec4(uint(x), uint(y), sad, 0u);
+return uvec3(uint(x), uint(y), sad);
+}
+
+void store_vector(int vector_index, uvec3 vector)
+{
+int output_index = vector_index * p.output_words_per_vector;
+if (p.output_words_per_vector == 2)
+{
+// Pack only the final output; vector and SAD calculations remain 32-bit.
+vector_blob_data[output_index] = (vector.x & 0xffffu) | ((vector.y & 0xffffu) << 16);
+vector_blob_data[output_index + 1] = vector.z;
+return;
+}
+
+vector_blob_data[output_index] = vector.x;
+vector_blob_data[output_index + 1] = vector.y;
+vector_blob_data[output_index + 2] = vector.z;
+vector_blob_data[output_index + 3] = 0u;
 }
 
 void main()
@@ -251,7 +268,7 @@ int internal_block_x = bx * p.internal_step_x - p.internal_pad_x;
 int internal_block_y = by * p.internal_step_y - p.internal_pad_y;
 vec4 reduced = reduce_flow_block(internal_block_x, internal_block_y);
 
-vector_blob_data[block_index] = make_vector(reduced.x, reduced.y, block_x, block_y, false);
-vector_blob_data[block_count + block_index] = make_vector(reduced.z, reduced.w, block_x, block_y, true);
+store_vector(block_index, make_vector(reduced.x, reduced.y, block_x, block_y, false));
+store_vector(block_count + block_index, make_vector(reduced.z, reduced.w, block_x, block_y, true));
 }
 )glsl";

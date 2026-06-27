@@ -222,6 +222,7 @@ struct MotionVectorScratchBuffers final {
     std::vector<float> composedY;
     std::vector<RIFEReducedFlowBlock> reducedFlow;
     std::vector<RIFEGpuMotionVector> gpuVectors;
+    std::vector<RIFEGpuPackedMotionVector> gpuPackedVectors;
     std::vector<MVToolsVector> backwardVectors;
     std::vector<MVToolsVector> forwardVectors;
     std::vector<char> backwardBlob;
@@ -277,6 +278,7 @@ enum class MotionVectorExportBackend : uint8_t {
     Cpu,
     GpuFlowReduce,
     GpuFull,
+    GpuFullPacked,
 };
 
 struct MotionVectorFrameStatsKeys final {
@@ -353,6 +355,7 @@ constexpr auto RIFEMVUnsupportedEarlyV4Error =
 static_assert(sizeof(MVArraySizeType) == 4);
 static_assert(sizeof(MVToolsVector) == 16);
 static_assert(sizeof(RIFEGpuMotionVector) == 16);
+static_assert(sizeof(RIFEGpuPackedMotionVector) == 8);
 static_assert(sizeof(MVAnalysisData) == 84);
 
 static int64_t monotonicNowNs() noexcept {
@@ -507,6 +510,8 @@ static const char* motionVectorExportBackendName(const MotionVectorExportBackend
         return "gpu_flow_reduce";
     case MotionVectorExportBackend::GpuFull:
         return "gpu_full";
+    case MotionVectorExportBackend::GpuFullPacked:
+        return "gpu_full_packed";
     default:
         return "unknown";
     }
@@ -520,8 +525,10 @@ static MotionVectorExportBackend parseMotionVectorExportBackend(const int value)
         return MotionVectorExportBackend::GpuFlowReduce;
     case 2:
         return MotionVectorExportBackend::GpuFull;
+    case 3:
+        return MotionVectorExportBackend::GpuFullPacked;
     default:
-        throw "gpu_mode must be 0 (cpu), 1 (gpu_flow_reduce), or 2 (gpu_full)";
+        throw "gpu_mode must be 0 (cpu), 1 (gpu_flow_reduce), 2 (gpu_full), or 3 (gpu_full_packed)";
     }
 }
 
@@ -1250,6 +1257,54 @@ static int processGpuMotionVectorsWithSemaphores(const RIFE* const rife,
     return status;
 }
 
+static int processGpuPackedMotionVectorsWithSemaphores(const RIFE* const rife,
+                                                       std::counting_semaphore<>* const localSemaphore,
+                                                       std::counting_semaphore<>* const sharedSemaphore,
+                                                       const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                                       RIFEGpuPackedMotionVector* vectorsOut, const RIFEGpuMotionVectorConfig& vectorConfig,
+                                                       int64_t* waitNs = nullptr,
+                                                       int64_t* localWaitNs = nullptr,
+                                                       int64_t* sharedWaitNs = nullptr,
+                                                       int64_t* rifeProcessWallNs = nullptr,
+                                                       FlowPerfBreakdown* flowPerf = nullptr) noexcept {
+    int64_t localWait{};
+    int64_t sharedWait{};
+    if (localWaitNs || waitNs) {
+        const auto localWaitStartNs = monotonicNowNs();
+        localSemaphore->acquire();
+        localWait = monotonicNowNs() - localWaitStartNs;
+    } else {
+        localSemaphore->acquire();
+    }
+
+    if (sharedSemaphore) {
+        if (sharedWaitNs || waitNs) {
+            const auto sharedWaitStartNs = monotonicNowNs();
+            sharedSemaphore->acquire();
+            sharedWait = monotonicNowNs() - sharedWaitStartNs;
+        } else {
+            sharedSemaphore->acquire();
+        }
+    }
+
+    if (localWaitNs)
+        *localWaitNs = localWait;
+    if (sharedWaitNs)
+        *sharedWaitNs = sharedWait;
+    if (waitNs)
+        *waitNs = localWait + sharedWait;
+
+    const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
+    const auto status = rife->process_motion_vectors_gpu_packed(src0Packed, src1Packed, vectorsOut, vectorConfig, flowPerf);
+    if (rifeProcessWallNs)
+        *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
+
+    if (sharedSemaphore)
+        sharedSemaphore->release();
+    localSemaphore->release();
+    return status;
+}
+
 static int computeBlockCount(const int size, const int blockSize, const int overlap, const int padding) noexcept {
     const auto step = blockSize - overlap;
     const auto paddedSize = size + padding * 2;
@@ -1498,16 +1553,39 @@ static void validateAbsSADClipRange(const int absSadClipRange) {
         throw "abs_sad_clip_range must be greater than or equal to 0";
 }
 
-static void validateGpuFullMotionVectorBackend(const MotionVectorConfig& config) {
+static void validateGpuFullMotionVectorBackend(const MotionVectorConfig& config, const int gpuMode) {
     if (config.inferenceWidth != config.backwardAnalysisData.nWidth ||
         config.inferenceHeight != config.backwardAnalysisData.nHeight)
-        throw "gpu_mode=2 currently requires inference dimensions to match the source dimensions";
+        throw std::runtime_error("gpu_mode=" + std::to_string(gpuMode) + " currently requires inference dimensions to match the source dimensions");
 
     const auto maxSample = (1ULL << config.bits) - 1ULL;
     const auto chromaScale = config.useChroma ? 3ULL : 1ULL;
     const auto maxRawSad = static_cast<unsigned long long>(config.blockSizeX) * config.blockSizeY * maxSample * chromaScale;
     if (maxRawSad > std::numeric_limits<uint32_t>::max())
-        throw "gpu_mode=2 raw SAD exceeds 32-bit storage for this block size and bit depth";
+        throw std::runtime_error("gpu_mode=" + std::to_string(gpuMode) + " raw SAD exceeds 32-bit storage for this block size and bit depth");
+}
+
+static void validateGpuFullPackedMotionVectorBackend(const MotionVectorConfig& config) {
+    // Validate the complete clamped output range before the shader narrows vector components.
+    const auto validateAxis = [&](const char* const axis, const int size, const int blockSize, const int step, const int padding, const int blockCount) {
+        const auto firstBlockCoord = -static_cast<int64_t>(padding);
+        const auto lastBlockCoord = static_cast<int64_t>(blockCount - 1) * step - padding;
+        const auto componentMin = [&](const int64_t blockCoord) {
+            return (-static_cast<int64_t>(padding) - blockCoord) * config.pel;
+        };
+        const auto componentMax = [&](const int64_t blockCoord) {
+            return (static_cast<int64_t>(size) - blockSize + padding - blockCoord) * config.pel;
+        };
+        const auto minimum = std::min(componentMin(firstBlockCoord), componentMin(lastBlockCoord));
+        const auto maximum = std::max(componentMax(firstBlockCoord), componentMax(lastBlockCoord));
+        if (minimum < std::numeric_limits<int16_t>::min() || maximum > std::numeric_limits<int16_t>::max()) {
+            throw std::runtime_error("gpu_mode=3 " + std::string(axis) + " vector range [" + std::to_string(minimum) + ", " +
+                                     std::to_string(maximum) + "] exceeds signed 16-bit storage");
+        }
+    };
+
+    validateAxis("X", config.backwardAnalysisData.nWidth, config.blockSizeX, config.stepX, config.hPadding, config.blkX);
+    validateAxis("Y", config.backwardAnalysisData.nHeight, config.blockSizeY, config.stepY, config.vPadding, config.blkY);
 }
 
 static void loadRIFEModel(RIFE& rife, const std::string& modelPath) {
@@ -2586,6 +2664,54 @@ static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuV
     packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
 }
 
+static int decodePackedMotionVectorComponent(const uint32_t value) noexcept {
+    // Decode two's-complement bits without relying on implementation-defined unsigned-to-signed narrowing.
+    const auto bits = value & 0xffffu;
+    return (bits & 0x8000u) != 0 ? static_cast<int>(bits) - 0x10000 : static_cast<int>(bits);
+}
+
+static void buildMotionVectorBlobsFromGpuPackedVectors(const RIFEGpuPackedMotionVector* gpuVectors,
+                                                       const bool valid, const MotionVectorConfig& config,
+                                                       std::vector<MVToolsVector>& backwardVectors,
+                                                       std::vector<MVToolsVector>& forwardVectors,
+                                                       std::vector<char>& backwardBlob, std::vector<char>& forwardBlob,
+                                                       MotionVectorFrameStats* const backwardStats = nullptr,
+                                                       MotionVectorFrameStats* const forwardStats = nullptr,
+                                                       const bool includeSadStats = true,
+                                                       const bool includeMotionStats = true) {
+    const auto vectorCount = static_cast<size_t>(config.blkX) * config.blkY;
+    backwardVectors.resize(vectorCount);
+    forwardVectors.resize(vectorCount);
+
+    if (!valid) {
+        for (size_t i = 0; i < vectorCount; i++) {
+            backwardVectors[i] = { 0, 0, config.invalidSad };
+            forwardVectors[i] = { 0, 0, config.invalidSad };
+        }
+
+        packMotionVectorBlob(backwardVectors, false, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+        packMotionVectorBlob(forwardVectors, false, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
+        return;
+    }
+
+    const auto* backwardGpuVectors = gpuVectors;
+    const auto* forwardGpuVectors = gpuVectors + vectorCount;
+    const auto unpackVector = [](const RIFEGpuPackedMotionVector& vector) {
+        return MVToolsVector{
+            decodePackedMotionVectorComponent(vector.packedXY),
+            decodePackedMotionVectorComponent(vector.packedXY >> 16),
+            static_cast<int64_t>(vector.rawSad)
+        };
+    };
+    for (size_t i = 0; i < vectorCount; i++) {
+        backwardVectors[i] = unpackVector(backwardGpuVectors[i]);
+        forwardVectors[i] = unpackVector(forwardGpuVectors[i]);
+    }
+
+    packMotionVectorBlob(backwardVectors, true, getMotionVectorAnalysisData(config, true), backwardBlob, backwardStats, includeSadStats, includeMotionStats);
+    packMotionVectorBlob(forwardVectors, true, getMotionVectorAnalysisData(config, false), forwardBlob, forwardStats, includeSadStats, includeMotionStats);
+}
+
 static std::vector<char> buildInvalidMotionVectorBlob(const MotionVectorConfig& config, const bool backward,
                                                       MotionVectorFrameStats* const stats = nullptr,
                                                       const bool includeSadStats = true,
@@ -3170,14 +3296,20 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             const auto height = vsapi->getFrameHeight(current, 0);
             const auto useGpuFlowReduce = d->mvExportBackend == MotionVectorExportBackend::GpuFlowReduce;
             const auto useGpuFull = d->mvExportBackend == MotionVectorExportBackend::GpuFull;
+            const auto useGpuFullPacked = d->mvExportBackend == MotionVectorExportBackend::GpuFullPacked;
+            const auto useGpuVectorExport = useGpuFull || useGpuFullPacked;
             RIFEFlowReduceConfig reduceConfig{};
             RIFEGpuMotionVectorConfig gpuVectorConfig{};
             if (useGpuFlowReduce) {
                 reduceConfig = createRIFEFlowReduceConfig(d->mvConfig);
                 scratch.reducedFlow.resize(static_cast<size_t>(reduceConfig.blockCountX) * reduceConfig.blockCountY);
-            } else if (useGpuFull) {
+            } else if (useGpuVectorExport) {
                 gpuVectorConfig = createRIFEGpuMotionVectorConfig(d->mvConfig);
-                scratch.gpuVectors.resize(static_cast<size_t>(gpuVectorConfig.blockCountX) * gpuVectorConfig.blockCountY * 2);
+                const auto vectorCount = static_cast<size_t>(gpuVectorConfig.blockCountX) * gpuVectorConfig.blockCountY * 2;
+                if (useGpuFullPacked)
+                    scratch.gpuPackedVectors.resize(vectorCount);
+                else
+                    scratch.gpuVectors.resize(vectorCount);
             } else {
                 const auto flowSize = static_cast<size_t>(width) * height * 4;
                 scratch.flow.resize(flowSize);
@@ -3216,6 +3348,15 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                                                d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
                                                                d->perfStats ? &rifeProcessWallNs : nullptr,
                                                                d->perfStats ? &flowPerf : nullptr);
+            } else if (useGpuFullPacked) {
+                status = processGpuPackedMotionVectorsWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
+                                                                     *currentPacked, *referencePacked,
+                                                                     scratch.gpuPackedVectors.data(), gpuVectorConfig,
+                                                                     d->perfStats ? &semaphoreWaitNs : nullptr,
+                                                                     d->perfStats ? &localSemaphoreWaitNs : nullptr,
+                                                                     d->perfStats ? &sharedSemaphoreWaitNs : nullptr,
+                                                                     d->perfStats ? &rifeProcessWallNs : nullptr,
+                                                                     d->perfStats ? &flowPerf : nullptr);
             } else {
                 status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
                                                    *currentPacked, *referencePacked,
@@ -3262,7 +3403,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                 return nullptr;
             }
 
-            if (!useGpuFull && !d->mvConfig.useChroma) {
+            if (!useGpuVectorExport && !d->mvConfig.useChroma) {
                 const auto lumaStartNs = d->perfStats ? monotonicNowNs() : 0;
                 const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
                 const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
@@ -3290,6 +3431,12 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                                      needStats ? &backwardStats : nullptr,
                                                      needStats ? &forwardStats : nullptr,
                                                      d->sadStats, d->motionStats);
+            } else if (useGpuFullPacked) {
+                buildMotionVectorBlobsFromGpuPackedVectors(scratch.gpuPackedVectors.data(), true, d->mvConfig,
+                                                           backwardVectors, forwardVectors, backwardBlob, forwardBlob,
+                                                           needStats ? &backwardStats : nullptr,
+                                                           needStats ? &forwardStats : nullptr,
+                                                           d->sadStats, d->motionStats);
             } else {
                 buildMotionVectorBlobsFromConfig(currentSource, referenceSource, scratch.flow.data(), width, height, true, d->mvConfig, vsapi,
                                                  currentLumaCache, referenceLumaCache, backwardVectors, forwardVectors,
@@ -4054,8 +4201,12 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, mvDelta,
                                   mvBits, mvHPadding, mvVPadding, mvBlockReduce);
-        if (pairData->mvExportBackend == MotionVectorExportBackend::GpuFull)
-            validateGpuFullMotionVectorBackend(pairData->mvConfig);
+        const auto useGpuFull = pairData->mvExportBackend == MotionVectorExportBackend::GpuFull;
+        const auto useGpuFullPacked = pairData->mvExportBackend == MotionVectorExportBackend::GpuFullPacked;
+        if (useGpuFull || useGpuFullPacked)
+            validateGpuFullMotionVectorBackend(pairData->mvConfig, static_cast<int>(pairData->mvExportBackend));
+        if (useGpuFullPacked)
+            validateGpuFullPackedMotionVectorBackend(pairData->mvConfig);
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
                                     pairData->mvExportBackend, sharedPackedCacheEnabled, packedCacheMiB, mvSadStats, mvMotionStats, perfStats,
                                     pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
@@ -4106,7 +4257,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         }
         pairData->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4,
                                                 resolvedModel.padding, flowResizeMode, resolvedModel.disableVulkanFp16,
-                                                pairData->mvExportBackend == MotionVectorExportBackend::GpuFull);
+                                                useGpuFull || useGpuFullPacked);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
     } catch (const std::exception& error) {
         vsapi->mapSetError(out, ("RIFEMV: "s + error.what()).c_str());

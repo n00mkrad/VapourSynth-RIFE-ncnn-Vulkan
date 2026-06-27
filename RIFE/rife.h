@@ -86,6 +86,11 @@ struct RIFEGpuMotionVector final {
     uint32_t reserved;
 };
 
+struct RIFEGpuPackedMotionVector final {
+    uint32_t packedXY; // Signed 16-bit X in the low word and signed 16-bit Y in the high word.
+    uint32_t rawSad; // SAD remains unsigned 32-bit to preserve gpu_full range.
+};
+
 class RIFE
 {
 public:
@@ -122,12 +127,21 @@ public:
     int process_motion_vectors_gpu(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
                                    RIFEGpuMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
                                    FlowPerfBreakdown* perf = nullptr) const;
+    int process_motion_vectors_gpu_packed(const float* src0R, const float* src0G, const float* src0B,
+                                          const float* src1R, const float* src1G, const float* src1B,
+                                          RIFEGpuPackedMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
+                                          const int w, const int h, const ptrdiff_t stride,
+                                          FlowPerfBreakdown* perf = nullptr) const;
+    int process_motion_vectors_gpu_packed(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                          RIFEGpuPackedMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
+                                          FlowPerfBreakdown* perf = nullptr) const;
 
 private:
     int process_flow_internal(const float* src0R, const float* src0G, const float* src0B,
                               const float* src1R, const float* src1G, const float* src1B,
                               float* flow, RIFEReducedFlowBlock* reducedFlow, const RIFEFlowReduceConfig* reduceConfig,
-                              RIFEGpuMotionVector* vectors, const RIFEGpuMotionVectorConfig* vectorConfig,
+                              RIFEGpuMotionVector* vectors, RIFEGpuPackedMotionVector* packedVectors,
+                              const RIFEGpuMotionVectorConfig* vectorConfig,
                               const int w, const int h, const ptrdiff_t stride,
                               const ncnn::Mat* src0Packed, const ncnn::Mat* src1Packed,
                               FlowPerfBreakdown* perf = nullptr) const;

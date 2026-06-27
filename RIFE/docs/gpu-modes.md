@@ -14,6 +14,7 @@ Mode mapping:
 - `0` = `cpu`
 - `1` = `gpu_flow_reduce`
 - `2` = `gpu_full`
+- `3` = `gpu_full_packed`
 
 `RIFEMVApprox2` and `RIFEMVApprox3` do not expose this option. They currently need dense displacement data for temporal composition, so they use the dense CPU export path internally.
 
@@ -24,6 +25,7 @@ Mode mapping:
 | `0` (`cpu`) | Full dense flow | none | flow reduction, vector conversion, SAD, stats, blob packing | safest default |
 | `1` (`gpu_flow_reduce`) | compact block flow | flow reduction only | vector conversion, SAD, stats, blob packing | recommended GPU-assisted mode |
 | `2` (`gpu_full`) | compact block vectors | flow reduction, vector conversion, clamping, raw SAD | stats, blob packing | experimental, narrower config support |
+| `3` (`gpu_full_packed`) | packed block vectors | same as `gpu_full` | unpacking, stats, blob packing | experimental, signed 16-bit vector range |
 
 For a 1920x1024 clip using the default 16x8 blocks and 8x4 overlap, the approximate readback sizes are:
 
@@ -32,8 +34,11 @@ For a 1920x1024 clip using the default 16x8 blocks and 8x4 overlap, the approxim
 | `0` (`cpu`) | about 15 MiB |
 | `1` (`gpu_flow_reduce`) | about 0.93 MiB |
 | `2` (`gpu_full`) | about 1.86 MiB |
+| `3` (`gpu_full_packed`) | about 0.93 MiB |
 
 `gpu_full` reads back more than `gpu_flow_reduce` because it returns two compact vector arrays, one backward and one forward, including raw SAD. It can still be faster if moving SAD and vector generation to GPU saves enough CPU work.
+
+`gpu_full_packed` performs the same GPU calculations as `gpu_full`, but stores each directional vector as an 8-byte record instead of a 16-byte record. The packed record contains signed 16-bit X/Y components and the unchanged 32-bit raw SAD.
 
 ## `"cpu"`
 
@@ -132,6 +137,25 @@ Parity notes:
 
 Use this mode as an explicit experimental backend until it has been validated on the specific settings you care about.
 
+## `"gpu_full_packed"`
+
+`"gpu_full_packed"` uses the same shader calculations and public output semantics as `"gpu_full"`. Only the intermediate GPU readback record changes:
+
+```text
+word 0: int16 x | int16 y
+word 1: uint32 raw SAD
+```
+
+The CPU explicitly sign-decodes X/Y, widens SAD to the normal MVTools representation, and then performs the same statistics and blob packing as `"gpu_full"`. Final `MVTools_vectors` records remain unchanged.
+
+This mode has all `"gpu_full"` limitations. It additionally validates the complete frame-bound-clamped X/Y range during filter creation and fails if either axis can exceed `[-32768, 32767]`. It does not saturate vectors or fall back to another mode.
+
+Expected effects:
+
+- `flow_readback_avg_mib` should be exactly half of `"gpu_full"` for the same block grid.
+- Vector and SAD output should be identical to `"gpu_full"` when the signed 16-bit range validation passes.
+- CPU unpacking adds a small amount of work before normal statistics and blob packing.
+
 ## Choosing A Mode
 
 Use `gpu_mode=0` (`cpu`) when correctness and broad compatibility matter more than speed, or when testing a setting that the GPU modes do not support.
@@ -139,6 +163,8 @@ Use `gpu_mode=0` (`cpu`) when correctness and broad compatibility matter more th
 Use `gpu_mode=1` (`gpu_flow_reduce`) when you want the main readback reduction with relatively low semantic risk. This is the best general performance mode to try first.
 
 Use `gpu_mode=2` (`gpu_full`) when you want to test whether moving vector and SAD work to GPU improves your workload. Expect it to be more configuration-sensitive than `gpu_flow_reduce`.
+
+Use `gpu_mode=3` (`gpu_full_packed`) when mode 2 vectors fit signed 16-bit storage and you want to halve its GPU readback without reducing SAD range or changing MVTools output.
 
 Example:
 
@@ -156,13 +182,13 @@ mvbw, mvfw = core.rmv.RIFEMV(
 )
 ```
 
-For `gpu_full`:
+For `gpu_full` or `gpu_full_packed`:
 
 ```python
 mvbw, mvfw = core.rmv.RIFEMV(
     clip,
     model_path=rife_mdl,
-    gpu_mode=2,
+    gpu_mode=3,
     res_scale=1.0,
     chroma=False,
     perf_stats=True,
@@ -178,10 +204,10 @@ Useful counters:
 - `flow_readback_avg_mib`: average GPU-to-CPU readback size per RIFE flow call.
 - `flow_export_direct_ms`: CPU time spent copying mapped readback data into the plugin output buffer.
 - `flow_reduce_record_ms`: command-recording time for the `gpu_flow_reduce` shader.
-- `flow_vector_record_ms`: command-recording time for the `gpu_full` shader.
+- `flow_vector_record_ms`: command-recording time for the `gpu_full` and `gpu_full_packed` shader.
 - `flow_submit_wait_ms`: time waiting for the GPU work and readback to complete.
-- `luma_build_ms`: CPU luma cache construction time. This should matter for `"cpu"` and `"gpu_flow_reduce"`, but not for `"gpu_full"`.
-- `vector_pack_ms`: CPU-side vector finalization, stats, and blob packing time. In `"cpu"` this includes dense-flow reduction and SAD. In `"gpu_flow_reduce"` it still includes SAD. In `"gpu_full"` it should be much smaller and mostly represent final conversion and packing.
+- `luma_build_ms`: CPU luma cache construction time. This should matter for `"cpu"` and `"gpu_flow_reduce"`, but not for `"gpu_full"` or `"gpu_full_packed"`.
+- `vector_pack_ms`: CPU-side vector finalization, stats, and blob packing time. In `"cpu"` this includes dense-flow reduction and SAD. In `"gpu_flow_reduce"` it still includes SAD. In `"gpu_full"` and `"gpu_full_packed"` it should be much smaller and mostly represent final conversion and packing.
 
 Interpret these counters together with end-to-end FPS. Some GPU modes move time from CPU counters into GPU wait time, so a single counter can look worse even when total throughput improves.
 

@@ -66,7 +66,8 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   - `0` (`cpu`) reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
   - `1` (`gpu_flow_reduce`) performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
   - `2` (`gpu_full`) performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD), then reads back compact vector arrays. CPU computes stats and packs MVTools blobs.
-  `2` (`gpu_full`) is currently limited to source-sized inference (`res_scale=1.0`). There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
+  - `3` (`gpu_full_packed`) performs the same work as `gpu_full`, but packs each vector into signed 16-bit X/Y components plus a 32-bit raw SAD, halving readback while preserving the final MVTools blob format.
+  `2` (`gpu_full`) and `3` (`gpu_full_packed`) are currently limited to source-sized inference (`res_scale=1.0`). Mode `3` also requires every frame-bound-clamped vector component to fit signed 16-bit storage. There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
   String values are not accepted.
   See [GPU export modes](gpu-modes.md) for details and tradeoffs.
 
@@ -238,7 +239,7 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - `shared_wait_ms` wait on the cross-instance `shared_flow_inflight` limiter
 - `flow_readback_mib` and `flow_readback_avg_mib` GPU-to-CPU readback size
 - `flow_reduce_record_ms` GPU command recording time for `gpu_flow_reduce`
-- `flow_vector_record_ms` GPU command recording time for `gpu_full`
+- `flow_vector_record_ms` GPU command recording time for `gpu_full` and `gpu_full_packed`
 - `packed_cache_hits` and `packed_cache_misses` packed inference-frame cache reuse counters
 - `packed_build_ms` and `packed_wait_ms` packed-frame build and cache-contention wait time
 - `render_sad_mask_ms` time spent rasterizing the `Gray8` SAD carrier plane when `render_sad_mask=True`

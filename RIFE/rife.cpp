@@ -757,6 +757,17 @@ static int copy_gpu_motion_vector_output_direct_from_ncnn(const ncnn::Mat& vecto
     return 0;
 }
 
+static int copy_gpu_packed_motion_vector_output_direct_from_ncnn(const ncnn::Mat& vector_cpu, RIFEGpuPackedMotionVector* vectors_out,
+                                                                 const int vector_count)
+{
+    if (vector_cpu.dims != 1 || vector_cpu.w < vector_count ||
+        vector_cpu.elempack != 2 || vector_cpu.elemsize != sizeof(RIFEGpuPackedMotionVector))
+        return -1;
+
+    std::memcpy(vectors_out, vector_cpu.data, static_cast<size_t>(vector_count) * sizeof(RIFEGpuPackedMotionVector));
+    return 0;
+}
+
 static bool extract_v4_flow_blob(ncnn::Extractor& ex, ncnn::VkCompute& cmd, ncnn::VkMat& flow,
                                  const std::string& preferred_flow_blob_name)
 {
@@ -828,7 +839,8 @@ static void scale_plane_to_ncnn_input(const float* src, const ptrdiff_t src_stri
 int RIFE::process_flow_internal(const float* src0R, const float* src0G, const float* src0B,
                                 const float* src1R, const float* src1G, const float* src1B,
                                 float* flow_out, RIFEReducedFlowBlock* reduced_flow_out, const RIFEFlowReduceConfig* reduce_config,
-                                RIFEGpuMotionVector* vectors_out, const RIFEGpuMotionVectorConfig* vector_config,
+                                RIFEGpuMotionVector* vectors_out, RIFEGpuPackedMotionVector* packed_vectors_out,
+                                const RIFEGpuMotionVectorConfig* vector_config,
                                 const int w, const int h, const ptrdiff_t stride,
                                 const ncnn::Mat* src0_packed, const ncnn::Mat* src1_packed,
                                 FlowPerfBreakdown* perf) const
@@ -1102,7 +1114,9 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
 
     if (vector_output)
     {
-        if (!rife_mv_full || !vectors_out || vector_config->blockCountX <= 0 || vector_config->blockCountY <= 0)
+        const auto packed_vector_output = packed_vectors_out != nullptr;
+        if (!rife_mv_full || (!vectors_out && !packed_vectors_out) || (vectors_out && packed_vectors_out) ||
+            vector_config->blockCountX <= 0 || vector_config->blockCountY <= 0)
             return finish(-1);
         if (flow_readback_source.w < w || flow_readback_source.h < h || flow_readback_source.elempack != 4)
             return finish(-1);
@@ -1113,8 +1127,10 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
 
         const auto vector_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
         const auto block_count = vector_config->blockCountX * vector_config->blockCountY;
+        const auto output_elemsize = packed_vector_output ? sizeof(RIFEGpuPackedMotionVector) : sizeof(RIFEGpuMotionVector);
+        const auto output_elempack = packed_vector_output ? 2 : 4;
         ncnn::VkMat vectors_gpu;
-        vectors_gpu.create(block_count * 2, sizeof(RIFEGpuMotionVector), 4, blob_vkallocator);
+        vectors_gpu.create(block_count * 2, output_elemsize, output_elempack, blob_vkallocator);
         if (vectors_gpu.empty())
             return finish(-1);
 
@@ -1148,7 +1164,7 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         constants[20].i = vector_config->pel;
         constants[21].i = vector_config->blockReduce;
         constants[22].i = vector_config->useChroma;
-        constants[23].i = 0;
+        constants[23].i = output_elempack;
         constants[24].f = vector_config->motionScaleX;
         constants[25].f = vector_config->motionScaleY;
         constants[26].f = static_cast<float>((1ULL << vector_config->bits) - 1ULL);
@@ -1210,7 +1226,10 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
     else if (vector_output)
     {
         const auto export_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        export_status = copy_gpu_motion_vector_output_direct_from_ncnn(flow_cpu, vectors_out, vector_config->blockCountX * vector_config->blockCountY * 2);
+        const auto vector_count = vector_config->blockCountX * vector_config->blockCountY * 2;
+        export_status = packed_vectors_out ?
+            copy_gpu_packed_motion_vector_output_direct_from_ncnn(flow_cpu, packed_vectors_out, vector_count) :
+            copy_gpu_motion_vector_output_direct_from_ncnn(flow_cpu, vectors_out, vector_count);
         if (collect_perf)
             perf->exportDirectNs += monotonic_now_ns() - export_start_ns;
     }
@@ -1252,7 +1271,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
                        FlowPerfBreakdown* perf) const
 {
     return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
-                                 flow_out, nullptr, nullptr, nullptr, nullptr,
+                                 flow_out, nullptr, nullptr, nullptr, nullptr, nullptr,
                                  w, h, stride, nullptr, nullptr, perf);
 }
 
@@ -1260,7 +1279,7 @@ int RIFE::process_flow(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packe
                        float* flow_out, FlowPerfBreakdown* perf) const
 {
     return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                 flow_out, nullptr, nullptr, nullptr, nullptr,
+                                 flow_out, nullptr, nullptr, nullptr, nullptr, nullptr,
                                  src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
 }
 
@@ -1271,7 +1290,7 @@ int RIFE::process_flow_reduced(const float* src0R, const float* src0G, const flo
                                FlowPerfBreakdown* perf) const
 {
     return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
-                                 nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr,
+                                 nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr, nullptr,
                                  w, h, stride, nullptr, nullptr, perf);
 }
 
@@ -1280,7 +1299,7 @@ int RIFE::process_flow_reduced(const ncnn::Mat& src0_packed, const ncnn::Mat& sr
                                FlowPerfBreakdown* perf) const
 {
     return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                 nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr,
+                                 nullptr, reduced_flow_out, &reduce_config, nullptr, nullptr, nullptr,
                                  src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
 }
 
@@ -1291,7 +1310,7 @@ int RIFE::process_motion_vectors_gpu(const float* src0R, const float* src0G, con
                                      FlowPerfBreakdown* perf) const
 {
     return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
-                                 nullptr, nullptr, nullptr, vectors_out, &vector_config,
+                                 nullptr, nullptr, nullptr, vectors_out, nullptr, &vector_config,
                                  w, h, stride, nullptr, nullptr, perf);
 }
 
@@ -1300,6 +1319,26 @@ int RIFE::process_motion_vectors_gpu(const ncnn::Mat& src0_packed, const ncnn::M
                                      FlowPerfBreakdown* perf) const
 {
     return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                 nullptr, nullptr, nullptr, vectors_out, &vector_config,
+                                 nullptr, nullptr, nullptr, vectors_out, nullptr, &vector_config,
+                                 src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
+}
+
+int RIFE::process_motion_vectors_gpu_packed(const float* src0R, const float* src0G, const float* src0B,
+                                            const float* src1R, const float* src1G, const float* src1B,
+                                            RIFEGpuPackedMotionVector* vectors_out, const RIFEGpuMotionVectorConfig& vector_config,
+                                            const int w, const int h, const ptrdiff_t stride,
+                                            FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
+                                 nullptr, nullptr, nullptr, nullptr, vectors_out, &vector_config,
+                                 w, h, stride, nullptr, nullptr, perf);
+}
+
+int RIFE::process_motion_vectors_gpu_packed(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packed,
+                                            RIFEGpuPackedMotionVector* vectors_out, const RIFEGpuMotionVectorConfig& vector_config,
+                                            FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr, nullptr, nullptr, nullptr, vectors_out, &vector_config,
                                  src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
 }
