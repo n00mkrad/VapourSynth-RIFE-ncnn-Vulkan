@@ -843,7 +843,8 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
                                 const RIFEGpuMotionVectorConfig* vector_config,
                                 const int w, const int h, const ptrdiff_t stride,
                                 const ncnn::Mat* src0_packed, const ncnn::Mat* src1_packed,
-                                FlowPerfBreakdown* perf) const
+                                FlowPerfBreakdown* perf,
+                                const ncnn::Mat* sad_src0_packed, const ncnn::Mat* sad_src1_packed) const
 {
     const bool collect_perf = perf != nullptr;
     if (collect_perf)
@@ -892,6 +893,10 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         };
         if (!packed_valid(*src0_packed) || !packed_valid(*src1_packed))
             return finish(-1);
+        if ((sad_src0_packed || sad_src1_packed) &&
+            (!sad_src0_packed || !sad_src1_packed ||
+             !packed_valid(*sad_src0_packed) || !packed_valid(*sad_src1_packed)))
+            return finish(-1);
         if (opt.use_int8_storage)
             return finish(-1);
         in0 = *src0_packed;
@@ -934,9 +939,16 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
 
     ncnn::VkMat in0_gpu;
     ncnn::VkMat in1_gpu;
+    ncnn::VkMat sad_in0_gpu;
+    ncnn::VkMat sad_in1_gpu;
     const auto upload_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
     cmd.record_clone(in0, in0_gpu, opt);
     cmd.record_clone(in1, in1_gpu, opt);
+    if (sad_src0_packed && sad_src1_packed)
+    {
+        cmd.record_clone(*sad_src0_packed, sad_in0_gpu, opt);
+        cmd.record_clone(*sad_src1_packed, sad_in1_gpu, opt);
+    }
     if (collect_perf)
         perf->uploadRecordNs += monotonic_now_ns() - upload_record_start_ns;
 
@@ -1120,9 +1132,12 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
             return finish(-1);
         if (flow_readback_source.w < w || flow_readback_source.h < h || flow_readback_source.elempack != 4)
             return finish(-1);
-        if (in0_gpu.w != w || in0_gpu.h != h || in1_gpu.w != w || in1_gpu.h != h ||
-            in0_gpu.c < 3 || in1_gpu.c < 3 || in0_gpu.elempack != 1 || in1_gpu.elempack != 1 ||
-            in0_gpu.elemsize != sizeof(float) || in1_gpu.elemsize != sizeof(float))
+        const auto use_separate_sad_input = sad_src0_packed && sad_src1_packed;
+        const ncnn::VkMat& sad_in0_gpu_ref = use_separate_sad_input ? sad_in0_gpu : in0_gpu;
+        const ncnn::VkMat& sad_in1_gpu_ref = use_separate_sad_input ? sad_in1_gpu : in1_gpu;
+        if (sad_in0_gpu_ref.w != w || sad_in0_gpu_ref.h != h || sad_in1_gpu_ref.w != w || sad_in1_gpu_ref.h != h ||
+            sad_in0_gpu_ref.c < 3 || sad_in1_gpu_ref.c < 3 || sad_in0_gpu_ref.elempack != 1 || sad_in1_gpu_ref.elempack != 1 ||
+            sad_in0_gpu_ref.elemsize != sizeof(float) || sad_in1_gpu_ref.elemsize != sizeof(float))
             return finish(-1);
 
         const auto vector_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
@@ -1136,17 +1151,17 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
 
         std::vector<ncnn::VkMat> bindings(4);
         bindings[0] = flow_readback_source;
-        bindings[1] = in0_gpu;
-        bindings[2] = in1_gpu;
+        bindings[1] = sad_in0_gpu_ref;
+        bindings[2] = sad_in1_gpu_ref;
         bindings[3] = vectors_gpu;
 
-        std::vector<ncnn::vk_constant_type> constants(28);
+        std::vector<ncnn::vk_constant_type> constants(32);
         constants[0].i = flow_readback_source.w;
         constants[1].i = w;
         constants[2].i = h;
-        constants[3].i = in0_gpu.w;
-        constants[4].i = in0_gpu.h;
-        constants[5].i = static_cast<int>(in0_gpu.cstep);
+        constants[3].i = sad_in0_gpu_ref.w;
+        constants[4].i = sad_in0_gpu_ref.h;
+        constants[5].i = static_cast<int>(sad_in0_gpu_ref.cstep);
         constants[6].i = vector_config->blockCountX;
         constants[7].i = vector_config->blockCountY;
         constants[8].i = vector_config->blockSizeX;
@@ -1168,7 +1183,11 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         constants[24].f = vector_config->motionScaleX;
         constants[25].f = vector_config->motionScaleY;
         constants[26].f = static_cast<float>((1ULL << vector_config->bits) - 1ULL);
-        constants[27].f = 0.0f;
+        constants[27].i = vector_config->weightedSad;
+        constants[28].f = vector_config->sadY;
+        constants[29].f = vector_config->sadUV;
+        constants[30].f = 0.0f;
+        constants[31].f = 0.0f;
 
         cmd.record_pipeline(rife_mv_full, bindings, constants, vectors_gpu);
         flow_readback_source = vectors_gpu;
@@ -1323,6 +1342,17 @@ int RIFE::process_motion_vectors_gpu(const ncnn::Mat& src0_packed, const ncnn::M
                                  src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
 }
 
+int RIFE::process_motion_vectors_gpu(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packed,
+                                     const ncnn::Mat& sad_src0_packed, const ncnn::Mat& sad_src1_packed,
+                                     RIFEGpuMotionVector* vectors_out, const RIFEGpuMotionVectorConfig& vector_config,
+                                     FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr, nullptr, nullptr, vectors_out, nullptr, &vector_config,
+                                 src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf,
+                                 &sad_src0_packed, &sad_src1_packed);
+}
+
 int RIFE::process_motion_vectors_gpu_packed(const float* src0R, const float* src0G, const float* src0B,
                                             const float* src1R, const float* src1G, const float* src1B,
                                             RIFEGpuPackedMotionVector* vectors_out, const RIFEGpuMotionVectorConfig& vector_config,
@@ -1341,4 +1371,15 @@ int RIFE::process_motion_vectors_gpu_packed(const ncnn::Mat& src0_packed, const 
     return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                                  nullptr, nullptr, nullptr, nullptr, vectors_out, &vector_config,
                                  src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf);
+}
+
+int RIFE::process_motion_vectors_gpu_packed(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packed,
+                                            const ncnn::Mat& sad_src0_packed, const ncnn::Mat& sad_src1_packed,
+                                            RIFEGpuPackedMotionVector* vectors_out, const RIFEGpuMotionVectorConfig& vector_config,
+                                            FlowPerfBreakdown* perf) const
+{
+    return process_flow_internal(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr, nullptr, nullptr, nullptr, vectors_out, &vector_config,
+                                 src0_packed.w, src0_packed.h, 0, &src0_packed, &src1_packed, perf,
+                                 &sad_src0_packed, &sad_src1_packed);
 }

@@ -107,7 +107,7 @@ The shader performs:
 - vector rounding
 - vector clamping
 - pixel displacement conversion
-- raw SAD (`chroma=0`: luma SAD, `chroma=1`: RGB SAD)
+- raw SAD (`chroma=0`: luma SAD, `chroma=1`: RGB SAD, or weighted synthetic Y/Cb/Cr SAD when `sad_y` or `sad_uv` is provided)
 
 The CPU still performs:
 
@@ -119,9 +119,10 @@ The shader outputs compact vectors instead of final MVTools blobs. That keeps th
 
 Current limitations:
 
-- `res_scale=1.0` only, because the shader currently computes SAD from the same RGBS frames uploaded for RIFE inference.
+- `res_scale=1.0` only, because the shader computes source-sized SAD directly on GPU. When `sad_clip` is provided, that clip is uploaded separately for the SAD calculation.
 - Source dimensions must match inference dimensions.
 - Raw SAD must fit in 32-bit storage.
+- Weighted synthetic Y/Cb/Cr SAD requires `chroma=1` and is only exposed for `RIFEMV` `gpu_full` / `gpu_full_packed`.
 - No automatic fallback.
 
 Expected effects:
@@ -134,6 +135,8 @@ Expected effects:
 Parity notes:
 
 `gpu_full` is more likely to differ from `"cpu"` than `gpu_flow_reduce` because vector rounding, clamping, sample quantization, and raw SAD are all performed in shader code. The intended behavior matches the CPU path, but small differences are possible near rounding boundaries or SAD quantization boundaries.
+
+If `sad_y` or `sad_uv` is provided, `gpu_full` switches its `chroma=1` SAD from the legacy RGB-channel sum to synthetic Rec.709 Y/Cb/Cr weighting. Omitting both parameters keeps the legacy path exactly.
 
 Use this mode as an explicit experimental backend until it has been validated on the specific settings you care about.
 
@@ -149,6 +152,8 @@ word 1: uint32 raw SAD
 The CPU explicitly sign-decodes X/Y, widens SAD to the normal MVTools representation, and then performs the same statistics and blob packing as `"gpu_full"`. Final `MVTools_vectors` records remain unchanged.
 
 This mode has all `"gpu_full"` limitations. It additionally validates the complete frame-bound-clamped X/Y range during filter creation and fails if either axis can exceed `[-32768, 32767]`. It does not saturate vectors or fall back to another mode.
+
+Weighted synthetic Y/Cb/Cr SAD uses the same shader path as `"gpu_full"`, so supported `sad_y` / `sad_uv` settings should produce identical SAD values in modes `2` and `3`.
 
 Expected effects:
 

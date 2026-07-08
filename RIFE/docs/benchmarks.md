@@ -12,7 +12,7 @@ clip = core.std.Merge(delta1, delta2) # Getting a frame from 'clip' will always 
 
 RTX 4090 (2 GPU threads per instance = 4 threads total) - Note that the GPU was never fully utilized due to bandwidth or other bottlenecks, power draw usually topped out at ~260W (out of 450). This means that if you have a slower card, your results may not be that much worse as the utilization is likely higher.
 
-`[rmv] RIFEMV parameters: gpu_thread=2 shared_flow_inflight=8 shared_luma_cache=true flow_scale=1 res_scale=1 cpu_flow_resize=auto perf_stats=true blksize_x=16 blksize_y=8 overlap_x=8 overlap_y=4 pel=1 delta=2 bits=8 sad_multiplier=1 render_sad_mask=false matrix_in_s=709 range_in_s=full hpad=0 vpad=0 block_reduce=1 chroma=false inference_width=1920 inference_height=1024`
+`[rmv] RIFEMV parameters: gpu_id=0 gpu_thread=2 shared_flow_inflight=8 shared_luma_cache=true shared_packed_cache=true packed_cache_mib=256 flow_scale=1 res_scale=1 cpu_flow_resize=auto gpu_mode=0 gpu_mode_name=cpu sad_stats=false motion_stats=false perf_stats=true blksize_x=16 blksize_y=8 overlap_x=8 overlap_y=4 pel=1 delta=2 bits=8 abs_sad_clip_range=0 render_sad_mask=false matrix_in_s=None range_in_s=None sad_clip=false hpad=0 vpad=0 block_reduce=1 chroma=false inference_width=1920 inference_height=1024`
 
 ### Model Speed Ranking
 

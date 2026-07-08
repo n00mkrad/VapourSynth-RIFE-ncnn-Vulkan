@@ -31,6 +31,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - Legacy `rife-v4` as well as `rife-v4.0` and `rife-v4.1` are not supported for motion-vector export.
 - Motion-vector APIs accept either constant-format `RGBS` or constant-format `YUV`. Non-`RGBS` `YUV` input is converted internally to `RGBS` for RIFE inference.
 - MVTools metadata is derived from the main `clip`. For non-`RGBS` input, the original input clip is used as the metadata source automatically.
+- The main `clip` is always used for RIFE motion estimation. The optional `sad_clip` is only used as the source-sized reference signal for synthetic SAD calculation and must match `clip` width, height, and frame count.
 - Vector clips are `Gray8` carrier clips. The motion data still lives in frame properties. By default the pixel plane contains a SAD mask derived from the exported block SADs for that direction, and `render_sad_mask=False` leaves that plane black instead.
 - By default the rendered SAD carrier mask is relative: it maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
 - If `abs_sad_clip_range > 0`, the rendered carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
@@ -39,6 +40,12 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - Do not resize or colorspace-convert the exported vector clips after creation. Use `rmv.CropGrid(...)` when a vector clip and matching `mv.Super` clip need a metadata-aware crop.
 
 ## Motion-vector arguments
+
+- `sad_clip`
+  Optional source-sized reference clip used for synthetic SAD calculation.
+  Default: omitted, which uses `clip`.
+  `clip` still supplies RIFE motion estimation, output geometry, and MVTools metadata. Use `sad_clip` when SAD should be measured against a different signal than the one used for motion estimation.
+  `sad_clip` must have the same width, height, and frame count as `clip`, and must be constant-format `RGBS` or constant-format `YUV`.
 
 - `flow_scale`
   Scales the image before flow estimation and rescales vectors back to the original image coordinates.  
@@ -65,7 +72,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Accepted values:
   - `0` (`cpu`) reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
   - `1` (`gpu_flow_reduce`) performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
-  - `2` (`gpu_full`) performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD), then reads back compact vector arrays. CPU computes stats and packs MVTools blobs.
+  - `2` (`gpu_full`) performs flow reduction, vector conversion, clamping, and raw SAD on GPU (`chroma=0`: luma SAD, `chroma=1`: RGB SAD, or weighted synthetic Y/Cb/Cr SAD when `sad_y` or `sad_uv` is provided), then reads back compact vector arrays. CPU computes stats and packs MVTools blobs.
   - `3` (`gpu_full_packed`) performs the same work as `gpu_full`, but packs each vector into signed 16-bit X/Y components plus a 32-bit raw SAD, halving readback while preserving the final MVTools blob format.
   `2` (`gpu_full`) and `3` (`gpu_full_packed`) are currently limited to source-sized inference (`res_scale=1.0`). Mode `3` also requires every frame-bound-clamped vector component to fit signed 16-bit storage. There is no automatic fallback; unsupported configurations fail instead of silently switching backend.
   String values are not accepted.
@@ -85,7 +92,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   `True` / `1` enables automatic sharing for the same logical source clip when synthetic SAD is computed from luma.
   `False` / `0` disables cross-instance sharing and keeps only the local per-instance cache.
   This is only relevant when `chroma=0`.
-  Automatic sharing is additionally scoped by the source clip identity, `bits`, and, for YUV input, `matrix_in_s` and `range_in_s`.
+  Automatic sharing is additionally scoped by the SAD source clip identity, `bits`, and, for YUV input, the explicit `matrix_in_s` / `range_in_s` override state. In props-driven conversion mode, sharing assumes stable `_Matrix` and `_Range` frame properties for that clip.
 
 - `shared_packed_cache`
   Controls whether prepacked inference RGB frames are shared across compatible filter instances.
@@ -93,7 +100,7 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Default: `True`.
   `True` / `1` enables cross-instance sharing for the same logical source clip and inference setup.
   `False` / `0` keeps packed-frame reuse local to the current filter instance only.
-  Automatic sharing is scoped by source clip identity, inference width and height, and, for YUV input, `matrix_in_s` and `range_in_s`.
+  Automatic sharing is scoped by the main `clip` identity, inference width and height, and, for YUV input, the explicit `matrix_in_s` / `range_in_s` override state. In props-driven conversion mode, sharing assumes stable `_Matrix` and `_Range` frame properties for that clip.
 
 - `packed_cache_mib`
   Memory budget (MiB) for packed inference-frame cache entries.
@@ -125,6 +132,12 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Set a higher value only if you explicitly want larger SAD values that track a higher-bit-depth scale.
   This also sets the exported MVTools `bitsPerSample` metadata so downstream filters scale `thsad` and `thscd1` against the same SAD range.
 
+- `sad_y`, `sad_uv`
+  Optional synthetic Rec.709 Y/Cb/Cr SAD sensitivity multipliers for `RIFEMV` `gpu_mode=2` and `gpu_mode=3`.
+  Default: omitted, preserving the existing luma/RGB SAD behavior exactly.
+  If either value is provided, missing values default to `1.0`, `chroma=1` is required, and SAD is computed as weighted Y plus weighted Cb/Cr instead of RGB-channel SAD.
+  Use `sad_uv=0` for weighted luma-only scoring through the GPU-full path.
+
 - `abs_sad_clip_range`
   Controls how SAD values are written into the `Gray8` carrier pixels.
   Default: `0`.
@@ -151,12 +164,14 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   If enabled, `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` are attached.
 
 - `matrix_in_s`
-  Input matrix used when the MV API receives a non-`RGBS` `YUV` clip and performs internal conversion to `RGBS`.
-  Default: `"709"`.
+  Input matrix override used when the MV API receives a non-`RGBS` `YUV` clip and performs internal conversion to `RGBS`.
+  Default: `None`.
+  When omitted, conversion uses the `_Matrix` frame property from the clip being converted. When specified, the value overrides `_Matrix` for both `clip` and `sad_clip` conversion. If a YUV clip has no usable `_Matrix` property, pass an explicit value.
 
 - `range_in_s`
-  Input range used for that same internal `YUV` -> `RGBS` conversion.
-  Default: `"full"`.
+  Input range override used for that same internal `YUV` -> `RGBS` conversion.
+  Default: `None`.
+  When omitted, conversion uses the `_Range` frame property from the clip being converted. If only the deprecated `_ColorRange` property is present, it is converted to `_Range` first (`_ColorRange=1` limited becomes `_Range=0`, `_ColorRange=0` full becomes `_Range=1`). If both properties exist, `_Range` has priority. When specified, the value overrides range props for both `clip` and `sad_clip` conversion. If a YUV clip has no usable range property, pass an explicit value.
 
 - `hpad`, `vpad`
   Horizontal and vertical padding written into MV metadata and used for vector clamping.
@@ -169,7 +184,8 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   Default: `1`.
 
 - `chroma`
-  If enabled, synthetic SAD includes all RGB channels. Otherwise it uses luma only.
+  If enabled, synthetic SAD includes all RGB channels by default. Otherwise it uses luma only.
+  When `sad_y` or `sad_uv` is provided with `gpu_mode=2` or `gpu_mode=3`, this must be enabled and SAD uses weighted synthetic Y/Cb/Cr instead of RGB-channel SAD.
 
 ## `rmv.CropGrid`
 
@@ -212,7 +228,7 @@ sup_crop = core.rmv.CropGrid(sup, left=1, right=1, vectors=mvfw)
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., sad_clip=None, gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_y=None, sad_uv=None, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, matrix_in_s=None, range_in_s=None, hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -247,16 +263,23 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 ### Recommended usage
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl)
 
 mask = core.mv.Mask(clip, mvfw, kind=5, ml=100.0)
+```
+
+To use a different signal for SAD without changing motion estimation or MVTools metadata, pass `sad_clip`:
+
+```python
+sad_ref = core.resize.Bicubic(clip, format=vs.RGBS)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, sad_clip=sad_ref)
 ```
 
 ### Example with Degrain1
 
 ```python
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full", pel=1, hpad=0, vpad=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, pel=1, hpad=0, vpad=0)
 
 den = core.mv.Degrain1(clip, sup, mvbw, mvfw, thsad=500)
 ```
@@ -272,7 +295,7 @@ They are useful when you want delta-2 or delta-3 vectors without running separat
 ### `RIFEMVApprox2`
 
 ```python
-outputs = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+outputs = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl)
 ```
 
 Output order:
@@ -287,7 +310,7 @@ bw1, fw1, bw2, fw2 = core.rmv.RIFEMVApprox2(...)
 ### `RIFEMVApprox3`
 
 ```python
-outputs = core.rmv.RIFEMVApprox3(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+outputs = core.rmv.RIFEMVApprox3(clip, model_path=rife_mdl)
 ```
 
 Output order:
@@ -302,13 +325,13 @@ bw1, fw1, bw2, fw2, bw3, fw3 = core.rmv.RIFEMVApprox3(...)
 
 ### Shared arguments
 
-`RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it, and they do not expose `gpu_mode` because the approximation path still requires dense displacement data.
+`RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it, they do not expose `gpu_mode` because the approximation path still requires dense displacement data, and they do not expose `sad_y` / `sad_uv` because weighted synthetic Y/Cb/Cr SAD is currently limited to the GPU-full path.
 
 ### Example with Degrain2
 
 ```python
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
-bw1, fw1, bw2, fw2 = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl, matrix_in_s="709", range_in_s="full")
+bw1, fw1, bw2, fw2 = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl)
 
 den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 ```

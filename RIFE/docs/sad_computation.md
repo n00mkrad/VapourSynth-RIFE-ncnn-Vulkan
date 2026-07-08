@@ -28,7 +28,7 @@ Only the way `pixelDx` and `pixelDy` are obtained differs.
 
 ## Inputs
 
-- `current`, `reference`: planar RGB `float32` frames being compared; `current` is the frame whose block is being scored, `reference` is the frame sampled at the motion-shifted position
+- `current`, `reference`: planar RGB `float32` SAD reference frames being compared; `current` is the frame whose block is being scored, `reference` is the frame sampled at the motion-shifted position. By default these come from `clip`, but when `sad_clip` is provided they come from `sad_clip`; RIFE motion estimation still uses `clip`.
 - `width`, `height`: dimensions of a single plane in pixels
 - `stride`: distance between the start of one row and the next, measured in float samples rather than bytes
 - `blockSize = mv_block_size`: square block size used for each exported motion vector
@@ -38,6 +38,7 @@ Only the way `pixelDx` and `pixelDy` are obtained differs.
 - `bits = mv_bits`: synthetic bit depth used to quantize comparison samples, scale exported SAD, and set the MVTools `bitsPerSample` metadata used by downstream threshold scaling; default `8` keeps thresholds and SAD on an 8-bit-equivalent scale unless you override it explicitly
 - `sadMultiplier = sad_multiplier`: positive post-scale applied to the final exported SAD values
 - `useChroma = mv_chroma`: if `1`, SAD uses all RGB channels; if `0`, SAD uses luma only
+- `sad_y`, `sad_uv`: optional `RIFEMV` GPU-full synthetic Rec.709 Y/Cb/Cr SAD multipliers. When either is provided, `mv_chroma=1` is required and missing values default to `1.0`. Omitting both preserves the legacy RGB-channel SAD path.
 - `hPadding = mv_hpad`, `vPadding = mv_vpad`: virtual horizontal and vertical analysis padding used for block placement and vector clamping
 - `blockReduce`: how per-pixel motion inside a block is reduced to a single block vector, where `0 = center sample` and `1 = average of the whole block`
 
@@ -150,10 +151,24 @@ q(v) = round(v * scale) / scale
 
 Here `currentX/currentY` are the edge-clamped coordinates inside the source block, `referenceX/referenceY` are the corresponding motion-shifted coordinates in the reference frame, and `currentIndex/referenceIndex` are row-major array indices into the planar float buffers. `scale` is the maximum integer sample value for the chosen synthetic SAD bit depth. `q(v)` is the synthetic-bit-depth quantizer applied to comparison samples before the absolute difference is measured.
 
-If `mv_chroma=1`, the per-pixel contribution is:
+If `mv_chroma=1` and `sad_y` / `sad_uv` are omitted, the legacy per-pixel contribution is:
 
 ```text
 round((abs(q(Rc) - q(Rr)) + abs(q(Gc) - q(Gr)) + abs(q(Bc) - q(Br))) * scale)
+```
+
+If `mv_chroma=1` and either `sad_y` or `sad_uv` is provided for `RIFEMV` `gpu_mode=2` or `gpu_mode=3`, RGB is converted to synthetic Rec.709 Y/Cb/Cr after sample quantization:
+
+```text
+Y  = 0.2126 * R + 0.7152 * G + 0.0722 * B
+Cb = 0.5 * (B - Y) / (1 - 0.0722)
+Cr = 0.5 * (R - Y) / (1 - 0.2126)
+```
+
+and the per-pixel contribution is:
+
+```text
+round((abs(Yc - Yr) * sad_y + (abs(Cbc - Cbr) + abs(Crc - Crr)) * sad_uv) * scale)
 ```
 
 If `mv_chroma=0`, RGB is converted to luma first:

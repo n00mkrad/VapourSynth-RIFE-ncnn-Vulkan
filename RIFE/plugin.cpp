@@ -293,6 +293,7 @@ struct MotionVectorFrameStatsKeys final {
 
 struct MotionVectorConfig final {
     bool useChroma;
+    bool weightedSad;
     int blockSizeX;
     int blockSizeY;
     int overlapX;
@@ -319,6 +320,8 @@ struct MotionVectorConfig final {
     int blockReduce;
     float motionScaleX;
     float motionScaleY;
+    float sadY;
+    float sadUV;
     int64_t invalidSad;
     MVAnalysisData backwardAnalysisData;
     MVAnalysisData forwardAnalysisData;
@@ -337,6 +340,13 @@ struct MotionVectorInternalGeometry final {
     int internalStepY;
     int internalHPadding;
     int internalVPadding;
+};
+
+struct MotionVectorColorConversionOptions final {
+    std::string matrixIn;
+    std::string rangeIn;
+    bool matrixInSpecified;
+    bool rangeInSpecified;
 };
 
 struct ResolvedRIFEModel final {
@@ -532,6 +542,41 @@ static MotionVectorExportBackend parseMotionVectorExportBackend(const int value)
     }
 }
 
+static MotionVectorColorConversionOptions readMotionVectorColorConversionOptions(const VSMap* in, const VSAPI* vsapi) {
+    MotionVectorColorConversionOptions options{};
+    int err{};
+
+    options.matrixInSpecified = vsapi->mapNumElements(in, "matrix_in_s") > 0;
+    if (options.matrixInSpecified) {
+        const auto* value = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
+        if (err || !value)
+            throw "matrix_in_s must be a string";
+        options.matrixIn = value;
+    }
+
+    options.rangeInSpecified = vsapi->mapNumElements(in, "range_in_s") > 0;
+    if (options.rangeInSpecified) {
+        const auto* value = vsapi->mapGetData(in, "range_in_s", 0, &err);
+        if (err || !value)
+            throw "range_in_s must be a string";
+        options.rangeIn = value;
+    }
+
+    return options;
+}
+
+static void setMotionVectorConversionCacheKey(SharedMotionVectorLumaCacheKey& key,
+                                              const MotionVectorColorConversionOptions& options) {
+    key.matrixIn = options.matrixInSpecified ? options.matrixIn : "<frame-props>";
+    key.rangeIn = options.rangeInSpecified ? options.rangeIn : "<frame-props>";
+}
+
+static void setMotionVectorConversionCacheKey(SharedMotionVectorPackedCacheKey& key,
+                                              const MotionVectorColorConversionOptions& options) {
+    key.matrixIn = options.matrixInSpecified ? options.matrixIn : "<frame-props>";
+    key.rangeIn = options.rangeInSpecified ? options.rangeIn : "<frame-props>";
+}
+
 static void printMotionVectorInvocation(const char* const functionName, const int gpuId, const int gpuThread,
                                         const int sharedFlowInFlight, const bool sharedLumaCache, const float flowScale,
                                         const FlowResizeMode flowResizeMode, const MotionVectorExportBackend mvExportBackend,
@@ -540,7 +585,8 @@ static void printMotionVectorInvocation(const char* const functionName, const in
                                         const MotionVectorConfig& config, const float resScale,
                                         const int inferenceWidth, const int inferenceHeight,
                                         const int absSadClipRange, const bool renderSadMask,
-                                        const char* const matrixIn, const char* const rangeIn,
+                                        const MotionVectorColorConversionOptions& conversionOptions,
+                                        const bool hasSadClip,
                                         const bool includeDelta) {
     std::ostringstream message;
     message << std::boolalpha
@@ -568,12 +614,16 @@ static void printMotionVectorInvocation(const char* const functionName, const in
     message << " bits=" << config.bits
             << " abs_sad_clip_range=" << absSadClipRange
             << " render_sad_mask=" << renderSadMask
-            << " matrix_in_s=" << matrixIn
-            << " range_in_s=" << rangeIn
+            << " matrix_in_s=" << (conversionOptions.matrixInSpecified ? conversionOptions.matrixIn : "None")
+            << " range_in_s=" << (conversionOptions.rangeInSpecified ? conversionOptions.rangeIn : "None")
+            << " sad_clip=" << hasSadClip
             << " hpad=" << config.hPadding
             << " vpad=" << config.vPadding
             << " block_reduce=" << config.blockReduce
             << " chroma=" << config.useChroma
+            << " weighted_sad=" << config.weightedSad
+            << " sad_y=" << config.sadY
+            << " sad_uv=" << config.sadUV
             << " inference_width=" << inferenceWidth
             << " inference_height=" << inferenceHeight;
     std::cerr << message.str() << std::endl;
@@ -905,7 +955,10 @@ static std::shared_ptr<const ncnn::Mat> getOrCreatePackedInferenceFrame(const st
                                                                          const VSAPI* vsapi) {
     if (!cache) {
         auto packed = std::make_shared<ncnn::Mat>();
+        const auto buildStartNs = perf ? monotonicNowNs() : 0;
         buildPackedInferenceFrame(frame, width, height, vsapi, *packed);
+        if (perf)
+            accumulatePerfStat(perf->packedBuildNs, monotonicNowNs() - buildStartNs);
         return packed;
     }
 
@@ -1213,6 +1266,7 @@ static int processGpuMotionVectorsWithSemaphores(const RIFE* const rife,
                                                  std::counting_semaphore<>* const localSemaphore,
                                                  std::counting_semaphore<>* const sharedSemaphore,
                                                  const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                                 const ncnn::Mat* const sadSrc0Packed, const ncnn::Mat* const sadSrc1Packed,
                                                  RIFEGpuMotionVector* vectorsOut, const RIFEGpuMotionVectorConfig& vectorConfig,
                                                  int64_t* waitNs = nullptr,
                                                  int64_t* localWaitNs = nullptr,
@@ -1247,7 +1301,9 @@ static int processGpuMotionVectorsWithSemaphores(const RIFE* const rife,
         *waitNs = localWait + sharedWait;
 
     const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
-    const auto status = rife->process_motion_vectors_gpu(src0Packed, src1Packed, vectorsOut, vectorConfig, flowPerf);
+    const auto status = sadSrc0Packed && sadSrc1Packed ?
+        rife->process_motion_vectors_gpu(src0Packed, src1Packed, *sadSrc0Packed, *sadSrc1Packed, vectorsOut, vectorConfig, flowPerf) :
+        rife->process_motion_vectors_gpu(src0Packed, src1Packed, vectorsOut, vectorConfig, flowPerf);
     if (rifeProcessWallNs)
         *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
 
@@ -1261,6 +1317,7 @@ static int processGpuPackedMotionVectorsWithSemaphores(const RIFE* const rife,
                                                        std::counting_semaphore<>* const localSemaphore,
                                                        std::counting_semaphore<>* const sharedSemaphore,
                                                        const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                                       const ncnn::Mat* const sadSrc0Packed, const ncnn::Mat* const sadSrc1Packed,
                                                        RIFEGpuPackedMotionVector* vectorsOut, const RIFEGpuMotionVectorConfig& vectorConfig,
                                                        int64_t* waitNs = nullptr,
                                                        int64_t* localWaitNs = nullptr,
@@ -1295,7 +1352,9 @@ static int processGpuPackedMotionVectorsWithSemaphores(const RIFE* const rife,
         *waitNs = localWait + sharedWait;
 
     const auto rifeProcessStartNs = rifeProcessWallNs ? monotonicNowNs() : 0;
-    const auto status = rife->process_motion_vectors_gpu_packed(src0Packed, src1Packed, vectorsOut, vectorConfig, flowPerf);
+    const auto status = sadSrc0Packed && sadSrc1Packed ?
+        rife->process_motion_vectors_gpu_packed(src0Packed, src1Packed, *sadSrc0Packed, *sadSrc1Packed, vectorsOut, vectorConfig, flowPerf) :
+        rife->process_motion_vectors_gpu_packed(src0Packed, src1Packed, vectorsOut, vectorConfig, flowPerf);
     if (rifeProcessWallNs)
         *rifeProcessWallNs = monotonicNowNs() - rifeProcessStartNs;
 
@@ -1333,9 +1392,11 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
                                                    const bool useChroma, const int blockSizeX, const int blockSizeY,
                                                    const int overlapX, const int overlapY,
                                                    const int pel, const int delta, const int bits, const int hPadding,
-                                                   const int vPadding, const int blockReduce) {
+                                                   const int vPadding, const int blockReduce,
+                                                   const bool weightedSad = false, const float sadY = 1.f, const float sadUV = 1.f) {
     MotionVectorConfig config{};
     config.useChroma = useChroma;
+    config.weightedSad = weightedSad;
     config.blockSizeX = blockSizeX;
     config.blockSizeY = blockSizeY;
     config.overlapX = overlapX;
@@ -1362,6 +1423,8 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
     config.blockReduce = blockReduce;
     config.motionScaleX = internalGeometry.motionScaleX;
     config.motionScaleY = internalGeometry.motionScaleY;
+    config.sadY = sadY;
+    config.sadUV = sadUV;
 
     const auto invalidSad = static_cast<int64_t>(blockSizeX) * blockSizeY * (1LL << bits);
     config.invalidSad = invalidSad;
@@ -1553,15 +1616,29 @@ static void validateAbsSADClipRange(const int absSadClipRange) {
         throw "abs_sad_clip_range must be greater than or equal to 0";
 }
 
+static void validateWeightedSAD(const bool weightedSad, const float sadY, const float sadUV,
+                                const bool useChroma, const MotionVectorExportBackend mvExportBackend) {
+    if (!std::isfinite(sadY) || sadY < 0.f)
+        throw "sad_y must be finite and greater than or equal to 0";
+    if (!std::isfinite(sadUV) || sadUV < 0.f)
+        throw "sad_uv must be finite and greater than or equal to 0";
+    if (!weightedSad)
+        return;
+    if (!useChroma)
+        throw "sad_y and sad_uv require chroma=1";
+    if (mvExportBackend != MotionVectorExportBackend::GpuFull && mvExportBackend != MotionVectorExportBackend::GpuFullPacked)
+        throw "sad_y and sad_uv currently require gpu_mode=2 or gpu_mode=3";
+}
+
 static void validateGpuFullMotionVectorBackend(const MotionVectorConfig& config, const int gpuMode) {
     if (config.inferenceWidth != config.backwardAnalysisData.nWidth ||
         config.inferenceHeight != config.backwardAnalysisData.nHeight)
         throw std::runtime_error("gpu_mode=" + std::to_string(gpuMode) + " currently requires inference dimensions to match the source dimensions");
 
     const auto maxSample = (1ULL << config.bits) - 1ULL;
-    const auto chromaScale = config.useChroma ? 3ULL : 1ULL;
-    const auto maxRawSad = static_cast<unsigned long long>(config.blockSizeX) * config.blockSizeY * maxSample * chromaScale;
-    if (maxRawSad > std::numeric_limits<uint32_t>::max())
+    const auto sadScale = config.weightedSad ? static_cast<double>(config.sadY) + 2.0 * static_cast<double>(config.sadUV) : (config.useChroma ? 3.0 : 1.0);
+    const auto maxRawSad = static_cast<long double>(config.blockSizeX) * config.blockSizeY * maxSample * sadScale;
+    if (maxRawSad > static_cast<long double>(std::numeric_limits<uint32_t>::max()))
         throw std::runtime_error("gpu_mode=" + std::to_string(gpuMode) + " raw SAD exceeds 32-bit storage for this block size and bit depth");
 }
 
@@ -1599,7 +1676,7 @@ static void loadRIFEModel(RIFE& rife, const std::string& modelPath) {
 #endif
 }
 
-struct MotionVectorInferenceClip final {
+struct MotionVectorPreparedClip final {
     VSNode* node;
     VSVideoInfo vi;
     bool convertedFromYUV;
@@ -1610,7 +1687,17 @@ struct MotionVectorClipSet final {
     VSVideoInfo sourceVi;
     VSNode* inferenceNode;
     VSVideoInfo inferenceVi;
-    bool convertedFromYUV;
+    bool sourceConvertedFromYUV;
+    bool inferenceConvertedFromYUV;
+    bool sourceMatchesInference;
+};
+
+struct MotionVectorColorPropOverrideData final {
+    VSNode* node;
+    VSVideoInfo vi;
+    bool clearMatrix;
+    bool clearRange;
+    bool normalizeRange;
 };
 
 static bool isRGBSVideoFormat(const VSVideoInfo& vi) noexcept {
@@ -1620,34 +1707,130 @@ static bool isRGBSVideoFormat(const VSVideoInfo& vi) noexcept {
            vi.format.bitsPerSample == 32;
 }
 
-static VSNode* convertMotionVectorClipToRGBS(const VSMap* in, VSNode* sourceNode,
-                                             VSCore* core, const VSAPI* vsapi) {
+static const VSFrame* VS_CC motionVectorColorPropOverrideGetFrame(int n, int activationReason, void* instanceData,
+                                                                  [[maybe_unused]] void** frameData,
+                                                                  VSFrameContext* frameCtx, VSCore* core,
+                                                                  const VSAPI* vsapi) {
+    auto d{ static_cast<const MotionVectorColorPropOverrideData*>(instanceData) };
+    if (activationReason == arInitial) {
+        vsapi->requestFrameFilter(n, d->node, frameCtx);
+    } else if (activationReason == arAllFramesReady) {
+        const auto* src = vsapi->getFrameFilter(n, d->node, frameCtx);
+        std::array<const VSFrame*, 4> planeSrc{};
+        std::array<int, 4> planes{};
+        for (auto plane = 0; plane < d->vi.format.numPlanes; plane++) {
+            planeSrc[plane] = src;
+            planes[plane] = plane;
+        }
+
+        auto dst = vsapi->newVideoFrame2(&d->vi.format, d->vi.width, d->vi.height, planeSrc.data(), planes.data(), src, core);
+        if (!dst) {
+            vsapi->freeFrame(src);
+            vsapi->setFilterError("RIFEMVColorProps: failed to copy frame", frameCtx);
+            return nullptr;
+        }
+
+        auto props = vsapi->getFramePropertiesRW(dst);
+        if (d->clearMatrix)
+            vsapi->mapDeleteKey(props, "_Matrix");
+        if (d->clearRange) {
+            vsapi->mapDeleteKey(props, "_Range");
+            vsapi->mapDeleteKey(props, "_ColorRange");
+        } else if (d->normalizeRange) {
+            int err{};
+            if (vsapi->mapNumElements(props, "_Range") > 0) {
+                const auto range = vsapi->mapGetInt(props, "_Range", 0, &err);
+                if (!err && (range == 0 || range == 1))
+                    vsapi->mapSetInt(props, "_Range", range, maReplace);
+            } else if (vsapi->mapNumElements(props, "_ColorRange") > 0) {
+                const auto colorRange = vsapi->mapGetInt(props, "_ColorRange", 0, &err);
+                if (!err && (colorRange == 0 || colorRange == 1))
+                    vsapi->mapSetInt(props, "_Range", colorRange == 0 ? 1 : 0, maReplace);
+            }
+        }
+
+        vsapi->freeFrame(src);
+        return dst;
+    }
+
+    return nullptr;
+}
+
+static void VS_CC motionVectorColorPropOverrideFree(void* instanceData, [[maybe_unused]] VSCore* core,
+                                                    const VSAPI* vsapi) {
+    auto d{ static_cast<MotionVectorColorPropOverrideData*>(instanceData) };
+    vsapi->freeNode(d->node);
+    delete d;
+}
+
+static VSNode* createMotionVectorColorPropOverrideClip(VSNode* sourceNode, const VSVideoInfo& sourceVi,
+                                                       const bool clearMatrix, const bool clearRange,
+                                                       const bool normalizeRange,
+                                                       VSCore* core, const VSAPI* vsapi) {
+    auto data = std::make_unique<MotionVectorColorPropOverrideData>();
+    data->node = vsapi->addNodeRef(sourceNode);
+    data->vi = sourceVi;
+    data->clearMatrix = clearMatrix;
+    data->clearRange = clearRange;
+    data->normalizeRange = normalizeRange;
+
+    VSFilterDependency deps[]{ { data->node, rpGeneral } };
+    auto node = vsapi->createVideoFilter2("RIFEMVColorProps", &data->vi, motionVectorColorPropOverrideGetFrame,
+                                          motionVectorColorPropOverrideFree, fmParallel, deps, 1, data.get(), core);
+    if (!node) {
+        vsapi->freeNode(data->node);
+        throw "failed to create internal color-property override filter";
+    }
+
+    data.release();
+    return node;
+}
+
+static MotionVectorPreparedClip buildMotionVectorRGBSSourceClip(VSNode* sourceNode, const VSVideoInfo& sourceVi,
+                                                                const MotionVectorColorConversionOptions& conversionOptions,
+                                                                const char* const clipName,
+                                                                VSCore* core, const VSAPI* vsapi) {
+    if (!vsh::isConstantVideoFormat(&sourceVi))
+        throw std::runtime_error(std::string(clipName) + " must have a constant format");
+
+    if (isRGBSVideoFormat(sourceVi))
+        return { vsapi->addNodeRef(sourceNode), sourceVi, false };
+
+    if (sourceVi.format.colorFamily != cfYUV)
+        throw std::runtime_error(std::string(clipName) + " must be a constant RGBS clip or a constant YUV clip");
+
     auto resizePlugin = vsapi->getPluginByID(VSH_RESIZE_PLUGIN_ID, core);
     if (!resizePlugin)
         throw "resize plugin is required for internal YUV->RGBS conversion";
 
-    int err{};
-    const auto matrixInValue = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
-    const auto* matrixIn = err ? "709" : matrixInValue;
-    const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
-    const auto* rangeIn = err ? "full" : rangeInValue;
+    auto overrideNode = createMotionVectorColorPropOverrideClip(sourceNode, sourceVi,
+                                                               conversionOptions.matrixInSpecified,
+                                                               conversionOptions.rangeInSpecified,
+                                                               !conversionOptions.rangeInSpecified,
+                                                               core, vsapi);
+    auto resizeInput = overrideNode;
 
     auto args = vsapi->createMap();
-    vsapi->mapSetNode(args, "clip", sourceNode, maReplace);
+    vsapi->mapSetNode(args, "clip", resizeInput, maReplace);
     vsapi->mapSetInt(args, "format", pfRGBS, maReplace);
-    vsapi->mapSetData(args, "matrix_in_s", matrixIn, -1, dtUtf8, maReplace);
-    vsapi->mapSetData(args, "range_in_s", rangeIn, -1, dtUtf8, maReplace);
+    if (conversionOptions.matrixInSpecified)
+        vsapi->mapSetData(args, "matrix_in_s", conversionOptions.matrixIn.c_str(), -1, dtUtf8, maReplace);
+    if (conversionOptions.rangeInSpecified)
+        vsapi->mapSetData(args, "range_in_s", conversionOptions.rangeIn.c_str(), -1, dtUtf8, maReplace);
 
     auto ret = vsapi->invoke(resizePlugin, "Bicubic", args);
     if (const auto* invokeError = vsapi->mapGetError(ret)) {
         const auto errorMessage = std::string("failed to convert clip to RGBS: ") + invokeError;
+        vsapi->freeNode(overrideNode);
         vsapi->freeMap(args);
         vsapi->freeMap(ret);
         throw std::runtime_error(errorMessage);
     }
 
+    int err{};
     auto rgbNode = vsapi->mapGetNode(ret, "clip", 0, &err);
     if (err || !rgbNode) {
+        vsapi->freeNode(overrideNode);
         vsapi->freeMap(args);
         vsapi->freeMap(ret);
         throw "resize.Bicubic did not return a clip";
@@ -1656,14 +1839,16 @@ static VSNode* convertMotionVectorClipToRGBS(const VSMap* in, VSNode* sourceNode
     const auto rgbVi = *vsapi->getVideoInfo(rgbNode);
     if (!isRGBSVideoFormat(rgbVi)) {
         vsapi->freeNode(rgbNode);
+        vsapi->freeNode(overrideNode);
         vsapi->freeMap(args);
         vsapi->freeMap(ret);
         throw "internal YUV->RGBS conversion did not produce a constant RGBS clip";
     }
 
+    vsapi->freeNode(overrideNode);
     vsapi->freeMap(args);
     vsapi->freeMap(ret);
-    return rgbNode;
+    return { rgbNode, rgbVi, true };
 }
 
 static VSNode* resizeMotionVectorClip(VSNode* sourceNode, const int width, const int height,
@@ -1706,94 +1891,50 @@ static VSNode* resizeMotionVectorClip(VSNode* sourceNode, const int width, const
     return resizedNode;
 }
 
-static MotionVectorInferenceClip buildMotionVectorInferenceClip(const VSMap* in, VSNode* sourceNode,
-                                                                const VSVideoInfo& sourceVi,
-                                                                VSCore* core, const VSAPI* vsapi) {
-    if (!vsh::isConstantVideoFormat(&sourceVi))
-        throw "clip must have a constant format";
-
-    if (isRGBSVideoFormat(sourceVi))
-        return { vsapi->addNodeRef(sourceNode), sourceVi, false };
-
-    if (sourceVi.format.colorFamily != cfYUV)
-        throw "motion-vector APIs require a constant RGBS clip or a constant YUV clip";
-
-    auto resizePlugin = vsapi->getPluginByID(VSH_RESIZE_PLUGIN_ID, core);
-    if (!resizePlugin)
-        throw "resize plugin is required for internal YUV->RGBS conversion";
-
-    int err{};
-    const auto matrixInValue = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
-    const auto* matrixIn = err ? "709" : matrixInValue;
-    const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
-    const auto* rangeIn = err ? "full" : rangeInValue;
-
-    auto args = vsapi->createMap();
-    vsapi->mapSetNode(args, "clip", sourceNode, maReplace);
-    vsapi->mapSetInt(args, "format", pfRGBS, maReplace);
-    vsapi->mapSetData(args, "matrix_in_s", matrixIn, -1, dtUtf8, maReplace);
-    vsapi->mapSetData(args, "range_in_s", rangeIn, -1, dtUtf8, maReplace);
-
-    auto ret = vsapi->invoke(resizePlugin, "Bicubic", args);
-    if (const auto* invokeError = vsapi->mapGetError(ret)) {
-        const auto errorMessage = std::string("failed to convert clip to RGBS: ") + invokeError;
-        vsapi->freeMap(args);
-        vsapi->freeMap(ret);
-        throw std::runtime_error(errorMessage);
-    }
-
-    auto rgbNode = vsapi->mapGetNode(ret, "clip", 0, &err);
-    if (err || !rgbNode) {
-        vsapi->freeMap(args);
-        vsapi->freeMap(ret);
-        throw "resize.Bicubic did not return a clip";
-    }
-
-    const auto rgbVi = *vsapi->getVideoInfo(rgbNode);
-    if (!isRGBSVideoFormat(rgbVi)) {
-        vsapi->freeNode(rgbNode);
-        vsapi->freeMap(args);
-        vsapi->freeMap(ret);
-        throw "internal YUV->RGBS conversion did not produce a constant RGBS clip";
-    }
-
-    vsapi->freeMap(args);
-    vsapi->freeMap(ret);
-    return { rgbNode, rgbVi, true };
+static void validateMotionVectorSadClip(const VSVideoInfo& sourceVi, const VSVideoInfo& sadVi) {
+    if (sadVi.width != sourceVi.width || sadVi.height != sourceVi.height)
+        throw "sad_clip must have the same width and height as clip";
+    if (sadVi.numFrames != sourceVi.numFrames)
+        throw "sad_clip must have the same frame count as clip";
 }
 
-static MotionVectorClipSet buildMotionVectorClipSet(const VSMap* in, VSNode* sourceNode,
-                                                    const VSVideoInfo& sourceVi,
+static MotionVectorClipSet buildMotionVectorClipSet(VSNode* sourceNode, const VSVideoInfo& sourceVi,
+                                                    VSNode* sadSourceNode, const VSVideoInfo* const sadSourceVi,
+                                                    const MotionVectorColorConversionOptions& conversionOptions,
                                                     const int inferenceWidth, const int inferenceHeight,
                                                     VSCore* core, const VSAPI* vsapi) {
     MotionVectorClipSet clips{};
+    MotionVectorPreparedClip motionSource{};
 
     try {
-        if (!vsh::isConstantVideoFormat(&sourceVi))
-            throw "clip must have a constant format";
+        motionSource = buildMotionVectorRGBSSourceClip(sourceNode, sourceVi, conversionOptions, "clip", core, vsapi);
+        clips.inferenceConvertedFromYUV = motionSource.convertedFromYUV;
 
-        if (isRGBSVideoFormat(sourceVi)) {
-            clips.sourceNode = vsapi->addNodeRef(sourceNode);
-            clips.sourceVi = sourceVi;
-            clips.convertedFromYUV = false;
+        if (inferenceWidth == motionSource.vi.width &&
+            inferenceHeight == motionSource.vi.height) {
+            clips.inferenceNode = vsapi->addNodeRef(motionSource.node);
+            clips.inferenceVi = motionSource.vi;
         } else {
-            if (sourceVi.format.colorFamily != cfYUV)
-                throw "motion-vector APIs require a constant RGBS clip or a constant YUV clip";
-
-            clips.sourceNode = convertMotionVectorClipToRGBS(in, sourceNode, core, vsapi);
-            clips.sourceVi = *vsapi->getVideoInfo(clips.sourceNode);
-            clips.convertedFromYUV = true;
-        }
-
-        if (inferenceWidth == clips.sourceVi.width &&
-            inferenceHeight == clips.sourceVi.height) {
-            clips.inferenceNode = vsapi->addNodeRef(clips.sourceNode);
-            clips.inferenceVi = clips.sourceVi;
-        } else {
-            clips.inferenceNode = resizeMotionVectorClip(clips.sourceNode, inferenceWidth, inferenceHeight, core, vsapi);
+            clips.inferenceNode = resizeMotionVectorClip(motionSource.node, inferenceWidth, inferenceHeight, core, vsapi);
             clips.inferenceVi = *vsapi->getVideoInfo(clips.inferenceNode);
         }
+
+        if (sadSourceNode) {
+            const auto sadSource = buildMotionVectorRGBSSourceClip(sadSourceNode, *sadSourceVi, conversionOptions, "sad_clip", core, vsapi);
+            clips.sourceNode = sadSource.node;
+            clips.sourceVi = sadSource.vi;
+            clips.sourceConvertedFromYUV = sadSource.convertedFromYUV;
+            clips.sourceMatchesInference = false;
+        } else {
+            clips.sourceNode = vsapi->addNodeRef(motionSource.node);
+            clips.sourceVi = motionSource.vi;
+            clips.sourceConvertedFromYUV = motionSource.convertedFromYUV;
+            clips.sourceMatchesInference = inferenceWidth == motionSource.vi.width && inferenceHeight == motionSource.vi.height;
+        }
+
+        vsapi->freeNode(motionSource.node);
     } catch (...) {
+        vsapi->freeNode(motionSource.node);
         vsapi->freeNode(clips.sourceNode);
         vsapi->freeNode(clips.inferenceNode);
         throw;
@@ -1843,6 +1984,7 @@ struct RIFEMVPairData final {
     bool sadStats;
     bool motionStats;
     bool perfStats;
+    bool sourceMatchesInference;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
 };
@@ -2465,8 +2607,11 @@ static RIFEGpuMotionVectorConfig createRIFEGpuMotionVectorConfig(const MotionVec
     vectorConfig.blockReduce = config.blockReduce;
     vectorConfig.bits = config.bits;
     vectorConfig.useChroma = config.useChroma ? 1 : 0;
+    vectorConfig.weightedSad = config.weightedSad ? 1 : 0;
     vectorConfig.motionScaleX = config.motionScaleX;
     vectorConfig.motionScaleY = config.motionScaleY;
+    vectorConfig.sadY = config.sadY;
+    vectorConfig.sadUV = config.sadUV;
     return vectorConfig;
 }
 
@@ -3322,6 +3467,25 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                                                        d->perfStats ? d->perf.get() : nullptr, vsapi);
             const auto referencePacked = getOrCreatePackedInferenceFrame(d->packedCache, reference, n + delta, width, height,
                                                                          d->perfStats ? d->perf.get() : nullptr, vsapi);
+            std::shared_ptr<const ncnn::Mat> currentSadPacked;
+            std::shared_ptr<const ncnn::Mat> referenceSadPacked;
+            const ncnn::Mat* currentSadPackedPtr{};
+            const ncnn::Mat* referenceSadPackedPtr{};
+            if (useGpuVectorExport) {
+                if (d->sourceMatchesInference) {
+                    currentSadPackedPtr = currentPacked.get();
+                    referenceSadPackedPtr = referencePacked.get();
+                } else {
+                    const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
+                    const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
+                    currentSadPacked = getOrCreatePackedInferenceFrame(nullptr, currentSource, n, sourceWidth, sourceHeight,
+                                                                       d->perfStats ? d->perf.get() : nullptr, vsapi);
+                    referenceSadPacked = getOrCreatePackedInferenceFrame(nullptr, referenceSource, n + delta, sourceWidth, sourceHeight,
+                                                                         d->perfStats ? d->perf.get() : nullptr, vsapi);
+                    currentSadPackedPtr = currentSadPacked.get();
+                    referenceSadPackedPtr = referenceSadPacked.get();
+                }
+            }
 
             int64_t semaphoreWaitNs{};
             int64_t localSemaphoreWaitNs{};
@@ -3342,6 +3506,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             } else if (useGpuFull) {
                 status = processGpuMotionVectorsWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
                                                                *currentPacked, *referencePacked,
+                                                               currentSadPackedPtr, referenceSadPackedPtr,
                                                                scratch.gpuVectors.data(), gpuVectorConfig,
                                                                d->perfStats ? &semaphoreWaitNs : nullptr,
                                                                d->perfStats ? &localSemaphoreWaitNs : nullptr,
@@ -3351,6 +3516,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             } else if (useGpuFullPacked) {
                 status = processGpuPackedMotionVectorsWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
                                                                      *currentPacked, *referencePacked,
+                                                                     currentSadPackedPtr, referenceSadPackedPtr,
                                                                      scratch.gpuPackedVectors.data(), gpuVectorConfig,
                                                                      d->perfStats ? &semaphoreWaitNs : nullptr,
                                                                      d->perfStats ? &localSemaphoreWaitNs : nullptr,
@@ -4024,6 +4190,7 @@ static void VS_CC cropGridCreate(const VSMap* in, VSMap* out, [[maybe_unused]] v
 
 static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
     auto pairData{ std::make_unique<RIFEMVPairData>() };
+    VSNode* sadInputNode{};
     VSNode* pairNode{};
     VSNode* backwardNode{};
     VSNode* forwardNode{};
@@ -4035,11 +4202,19 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
-        const auto sharedLumaSourceIdentity = reinterpret_cast<uintptr_t>(pairData->node);
+        const auto sharedPackedSourceIdentity = reinterpret_cast<uintptr_t>(pairData->node);
         pairData->vi = *vsapi->getVideoInfo(pairData->node);
         const auto sourceVi = pairData->vi;
-        bool sourceConverted{};
         int err;
+        int sadErr{};
+        sadInputNode = vsapi->mapGetNode(in, "sad_clip", 0, &sadErr);
+        const auto hasSadClip = !sadErr;
+        VSVideoInfo sadInputVi{};
+        if (hasSadClip) {
+            sadInputVi = *vsapi->getVideoInfo(sadInputNode);
+            validateMotionVectorSadClip(sourceVi, sadInputVi);
+        }
+        const auto sharedLumaSourceIdentity = reinterpret_cast<uintptr_t>(hasSadClip ? sadInputNode : pairData->node);
 
         if (ncnn::create_gpu_instance())
             throw "failed to create GPU instance";
@@ -4083,10 +4258,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (hasGpuMode && err)
             throw "gpu_mode must be an integer";
         pairData->mvExportBackend = parseMotionVectorExportBackend(hasGpuMode ? static_cast<int>(gpuMode) : 0);
-        const auto matrixInValue = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
-        const auto* matrixIn = err ? "709" : matrixInValue;
-        const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
-        const auto* rangeIn = err ? "full" : rangeInValue;
+        const auto conversionOptions = readMotionVectorColorConversionOptions(in, vsapi);
         mvSadStats = !!vsapi->mapGetInt(in, "sad_stats", 0, &err);
         mvMotionStats = !!vsapi->mapGetInt(in, "motion_stats", 0, &err);
         const auto perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
@@ -4127,6 +4299,19 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (err)
             mvBlockReduce = MVBlockReduceAverage;
         const auto mvUseChroma = !!vsapi->mapGetInt(in, "chroma", 0, &err);
+        const auto hasSadY = vsapi->mapNumElements(in, "sad_y") > 0;
+        const auto hasSadUV = vsapi->mapNumElements(in, "sad_uv") > 0;
+        const auto mvWeightedSad = hasSadY || hasSadUV;
+        auto mvSadY{ static_cast<float>(vsapi->mapGetFloat(in, "sad_y", 0, &err)) };
+        if (hasSadY && err)
+            throw "sad_y must be a float";
+        if (err)
+            mvSadY = 1.f;
+        auto mvSadUV{ static_cast<float>(vsapi->mapGetFloat(in, "sad_uv", 0, &err)) };
+        if (hasSadUV && err)
+            throw "sad_uv must be a float";
+        if (err)
+            mvSadUV = 1.f;
 
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
             throw "invalid GPU device";
@@ -4183,6 +4368,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             throw "block_reduce must be 0 (center) or 1 (average)";
         if (packedCacheMiB < 1)
             throw "packed_cache_mib must be greater than 0";
+        validateWeightedSAD(mvWeightedSad, mvSadY, mvSadUV, mvUseChroma, pairData->mvExportBackend);
 
         const auto inferenceWidth = computeInferenceDimension(sourceVi.width, resScale, "width");
         const auto inferenceHeight = computeInferenceDimension(sourceVi.height, resScale, "height");
@@ -4191,16 +4377,21 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
                                                                            mvBlockSizeX, mvBlockSizeY,
                                                                            mvOverlapX, mvOverlapY,
                                                                            mvHPadding, mvVPadding);
-        const auto clipSet = buildMotionVectorClipSet(in, pairData->node, sourceVi, inferenceWidth, inferenceHeight, core, vsapi);
+        const auto clipSet = buildMotionVectorClipSet(pairData->node, sourceVi,
+                                                      hasSadClip ? sadInputNode : nullptr,
+                                                      hasSadClip ? &sadInputVi : nullptr,
+                                                      conversionOptions, inferenceWidth, inferenceHeight, core, vsapi);
         vsapi->freeNode(pairData->node);
         pairData->node = clipSet.inferenceNode;
         pairData->sourceNode = clipSet.sourceNode;
-        sourceConverted = clipSet.convertedFromYUV;
+        pairData->sourceMatchesInference = clipSet.sourceMatchesInference;
+        vsapi->freeNode(sadInputNode);
+        sadInputNode = nullptr;
 
-        const VSVideoInfo* metadataVi = sourceConverted ? &sourceVi : nullptr;
+        const VSVideoInfo* metadataVi = clipSet.inferenceConvertedFromYUV ? &sourceVi : nullptr;
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry, mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, mvDelta,
-                                  mvBits, mvHPadding, mvVPadding, mvBlockReduce);
+                                                      mvBits, mvHPadding, mvVPadding, mvBlockReduce, mvWeightedSad, mvSadY, mvSadUV);
         const auto useGpuFull = pairData->mvExportBackend == MotionVectorExportBackend::GpuFull;
         const auto useGpuFullPacked = pairData->mvExportBackend == MotionVectorExportBackend::GpuFullPacked;
         if (useGpuFull || useGpuFullPacked)
@@ -4210,7 +4401,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         printMotionVectorInvocation("RIFEMV", gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
                                     pairData->mvExportBackend, sharedPackedCacheEnabled, packedCacheMiB, mvSadStats, mvMotionStats, perfStats,
                                     pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
-                                    mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, true);
+                                    mvAbsSADClipRange, mvRenderSadMask, conversionOptions, hasSadClip, true);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
             throw "failed to create RIFEMV output format";
@@ -4224,11 +4415,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             key.width = clipSet.sourceVi.width;
             key.height = clipSet.sourceVi.height;
             key.bits = mvBits;
-            key.convertedFromYUV = sourceConverted;
-            if (sourceConverted) {
-                key.matrixIn = matrixIn;
-                key.rangeIn = rangeIn;
-            }
+            key.convertedFromYUV = clipSet.sourceConvertedFromYUV;
+            if (clipSet.sourceConvertedFromYUV)
+                setMotionVectorConversionCacheKey(key, conversionOptions);
             pairData->lumaCache = acquireSharedLumaCache(key, 16);
         } else {
             pairData->lumaCache = createMotionVectorLumaCache(4);
@@ -4236,14 +4425,12 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         const auto packedCacheMaxEntries = computePackedCacheMaxEntries(clipSet.inferenceVi.width, clipSet.inferenceVi.height, packedCacheMiB);
         if (sharedPackedCacheEnabled) {
             SharedMotionVectorPackedCacheKey key{};
-            key.sourceIdentity = sharedLumaSourceIdentity;
+            key.sourceIdentity = sharedPackedSourceIdentity;
             key.inferenceWidth = clipSet.inferenceVi.width;
             key.inferenceHeight = clipSet.inferenceVi.height;
-            key.convertedFromYUV = sourceConverted;
-            if (sourceConverted) {
-                key.matrixIn = matrixIn;
-                key.rangeIn = rangeIn;
-            }
+            key.convertedFromYUV = clipSet.inferenceConvertedFromYUV;
+            if (clipSet.inferenceConvertedFromYUV)
+                setMotionVectorConversionCacheKey(key, conversionOptions);
             pairData->packedCache = acquireSharedPackedCache(key, packedCacheMaxEntries);
         } else {
             pairData->packedCache = createMotionVectorPackedCache(packedCacheMaxEntries);
@@ -4263,6 +4450,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         vsapi->mapSetError(out, ("RIFEMV: "s + error.what()).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
+        vsapi->freeNode(sadInputNode);
 
         if (hasGPUInstance && --numGPUInstances == 0)
             ncnn::destroy_gpu_instance();
@@ -4271,6 +4459,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         vsapi->mapSetError(out, ("RIFEMV: "s + error).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
+        vsapi->freeNode(sadInputNode);
 
         if (hasGPUInstance && --numGPUInstances == 0)
             ncnn::destroy_gpu_instance();
@@ -4353,6 +4542,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
 static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* vsapi,
                                    const int maxDelta, const char* functionName) {
     auto pairData{ std::make_unique<RIFEMVApproxPairData>() };
+    VSNode* sadInputNode{};
     VSNode* sourceNode{};
     VSNode* pairNode{};
     bool hasGPUInstance{};
@@ -4365,11 +4555,19 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
     try {
         pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
-        const auto sharedLumaSourceIdentity = reinterpret_cast<uintptr_t>(pairData->node);
+        const auto sharedPackedSourceIdentity = reinterpret_cast<uintptr_t>(pairData->node);
         pairData->vi = *vsapi->getVideoInfo(pairData->node);
         const auto sourceVi = pairData->vi;
-        bool sourceConverted{};
         int err;
+        int sadErr{};
+        sadInputNode = vsapi->mapGetNode(in, "sad_clip", 0, &sadErr);
+        const auto hasSadClip = !sadErr;
+        VSVideoInfo sadInputVi{};
+        if (hasSadClip) {
+            sadInputVi = *vsapi->getVideoInfo(sadInputNode);
+            validateMotionVectorSadClip(sourceVi, sadInputVi);
+        }
+        const auto sharedLumaSourceIdentity = reinterpret_cast<uintptr_t>(hasSadClip ? sadInputNode : pairData->node);
 
         if (ncnn::create_gpu_instance())
             throw "failed to create GPU instance";
@@ -4409,10 +4607,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         const auto cpuFlowResize{ vsapi->mapGetIntSaturated(in, "cpu_flow_resize", 0, &err) };
         if (!err)
             flowResizeMode = cpuFlowResize ? FlowResizeMode::ForceCPU : FlowResizeMode::ForceGPU;
-        const auto matrixInValue = vsapi->mapGetData(in, "matrix_in_s", 0, &err);
-        const auto* matrixIn = err ? "709" : matrixInValue;
-        const auto rangeInValue = vsapi->mapGetData(in, "range_in_s", 0, &err);
-        const auto* rangeIn = err ? "full" : rangeInValue;
+        const auto conversionOptions = readMotionVectorColorConversionOptions(in, vsapi);
         mvSadStats = !!vsapi->mapGetInt(in, "sad_stats", 0, &err);
         mvMotionStats = !!vsapi->mapGetInt(in, "motion_stats", 0, &err);
         auto mvBlockSizeX{ vsapi->mapGetIntSaturated(in, "blksize_x", 0, &err) };
@@ -4510,13 +4705,17 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
                                                                            mvBlockSizeX, mvBlockSizeY,
                                                                            mvOverlapX, mvOverlapY,
                                                                            mvHPadding, mvVPadding);
-        const auto clipSet = buildMotionVectorClipSet(in, pairData->node, sourceVi, inferenceWidth, inferenceHeight, core, vsapi);
+        const auto clipSet = buildMotionVectorClipSet(pairData->node, sourceVi,
+                                                      hasSadClip ? sadInputNode : nullptr,
+                                                      hasSadClip ? &sadInputVi : nullptr,
+                                                      conversionOptions, inferenceWidth, inferenceHeight, core, vsapi);
         vsapi->freeNode(pairData->node);
         pairData->node = clipSet.inferenceNode;
         pairData->sourceNode = clipSet.sourceNode;
-        sourceConverted = clipSet.convertedFromYUV;
+        vsapi->freeNode(sadInputNode);
+        sadInputNode = nullptr;
 
-        const VSVideoInfo* metadataVi = sourceConverted ? &sourceVi : nullptr;
+        const VSVideoInfo* metadataVi = clipSet.inferenceConvertedFromYUV ? &sourceVi : nullptr;
         pairData->mvConfig = createMotionVectorConfig(pairData->vi, metadataVi, mvInternalGeometry,
                                                       mvUseChroma, mvBlockSizeX, mvBlockSizeY,
                                                       mvOverlapX, mvOverlapY, mvPel, 1,
@@ -4530,7 +4729,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         printMotionVectorInvocation(functionName, gpuId, gpuThread, sharedFlowInFlight, sharedLumaCacheEnabled, flowScale, flowResizeMode,
                                     MotionVectorExportBackend::Cpu, sharedPackedCacheEnabled, packedCacheMiB, mvSadStats, mvMotionStats, perfStats,
                                     pairData->mvConfig, resScale, inferenceWidth, inferenceHeight,
-                                    mvAbsSADClipRange, mvRenderSadMask, matrixIn, rangeIn, false);
+                                    mvAbsSADClipRange, mvRenderSadMask, conversionOptions, hasSadClip, false);
 
         if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
             throw "failed to create output format";
@@ -4545,11 +4744,9 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
             key.width = clipSet.sourceVi.width;
             key.height = clipSet.sourceVi.height;
             key.bits = mvBits;
-            key.convertedFromYUV = sourceConverted;
-            if (sourceConverted) {
-                key.matrixIn = matrixIn;
-                key.rangeIn = rangeIn;
-            }
+            key.convertedFromYUV = clipSet.sourceConvertedFromYUV;
+            if (clipSet.sourceConvertedFromYUV)
+                setMotionVectorConversionCacheKey(key, conversionOptions);
             pairData->lumaCache = acquireSharedLumaCache(key, 16);
         } else {
             pairData->lumaCache = createMotionVectorLumaCache(4);
@@ -4557,14 +4754,12 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         const auto packedCacheMaxEntries = computePackedCacheMaxEntries(clipSet.inferenceVi.width, clipSet.inferenceVi.height, packedCacheMiB);
         if (sharedPackedCacheEnabled) {
             SharedMotionVectorPackedCacheKey key{};
-            key.sourceIdentity = sharedLumaSourceIdentity;
+            key.sourceIdentity = sharedPackedSourceIdentity;
             key.inferenceWidth = clipSet.inferenceVi.width;
             key.inferenceHeight = clipSet.inferenceVi.height;
-            key.convertedFromYUV = sourceConverted;
-            if (sourceConverted) {
-                key.matrixIn = matrixIn;
-                key.rangeIn = rangeIn;
-            }
+            key.convertedFromYUV = clipSet.inferenceConvertedFromYUV;
+            if (clipSet.inferenceConvertedFromYUV)
+                setMotionVectorConversionCacheKey(key, conversionOptions);
             pairData->packedCache = acquireSharedPackedCache(key, packedCacheMaxEntries);
         } else {
             pairData->packedCache = createMotionVectorPackedCache(packedCacheMaxEntries);
@@ -4583,6 +4778,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         vsapi->mapSetError(out, (std::string(functionName) + ": " + error.what()).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
+        vsapi->freeNode(sadInputNode);
         vsapi->freeNode(sourceNode);
 
         if (hasGPUInstance && --numGPUInstances == 0)
@@ -4592,6 +4788,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         vsapi->mapSetError(out, (std::string(functionName) + ": " + error).c_str());
         vsapi->freeNode(pairData->node);
         vsapi->freeNode(pairData->sourceNode);
+        vsapi->freeNode(sadInputNode);
         vsapi->freeNode(sourceNode);
 
         if (hasGPUInstance && --numGPUInstances == 0)
@@ -4707,6 +4904,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
     vspapi->registerFunction("RIFEMV",
                              "clip:vnode;"
                              "model_path:data;"
+                             "sad_clip:vnode:opt;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
@@ -4725,6 +4923,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "pel:int:opt;"
                              "delta:int:opt;"
                              "bits:int:opt;"
+                             "sad_y:float:opt;"
+                             "sad_uv:float:opt;"
                              "abs_sad_clip_range:int:opt;"
                              "render_sad_mask:int:opt;"
                              "sad_stats:int:opt;"
@@ -4741,6 +4941,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
     vspapi->registerFunction("RIFEMVApprox2",
                              "clip:vnode;"
                              "model_path:data;"
+                             "sad_clip:vnode:opt;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"
@@ -4773,6 +4974,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
     vspapi->registerFunction("RIFEMVApprox3",
                              "clip:vnode;"
                              "model_path:data;"
+                             "sad_clip:vnode:opt;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "shared_flow_inflight:int:opt;"

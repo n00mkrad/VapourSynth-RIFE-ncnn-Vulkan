@@ -44,7 +44,12 @@ int output_words_per_vector;
 float motion_scale_x;
 float motion_scale_y;
 float max_sample;
+int weighted_sad;
+
+float sad_y;
+float sad_uv;
 float reserved2;
+float reserved3;
 } p;
 
 int clampi(int value, int limit)
@@ -153,6 +158,22 @@ float load_sad_reference_luma(int x, int y, bool swap_images)
 return swap_images ? load_current_luma(x, y) : load_reference_luma(x, y);
 }
 
+vec3 rgb_to_ycbcr(vec3 rgb)
+{
+float y = rgb.r * 0.2126f + rgb.g * 0.7152f + rgb.b * 0.0722f;
+float cb = 0.5f * (rgb.b - y) / (1.f - 0.0722f);
+float cr = 0.5f * (rgb.r - y) / (1.f - 0.2126f);
+return vec3(y, cb, cr);
+}
+
+uint compute_weighted_ycbcr_sad_sample(vec3 current_rgb, vec3 reference_rgb)
+{
+vec3 current_ycbcr = rgb_to_ycbcr(current_rgb);
+vec3 reference_ycbcr = rgb_to_ycbcr(reference_rgb);
+vec3 diff = abs(current_ycbcr - reference_ycbcr);
+return round_positive((diff.x * p.sad_y + (diff.y + diff.z) * p.sad_uv) * p.max_sample);
+}
+
 uint compute_sad(int pixel_dx, int pixel_dy, int block_x, int block_y, bool swap_images)
 {
 uint sad = 0;
@@ -177,8 +198,15 @@ for (int x = 0; x < p.block_size_x; x++)
 {
 vec3 current_rgb = load_sad_current_rgb(current_x0 + x, current_y0 + y, swap_images);
 vec3 reference_rgb = load_sad_reference_rgb(reference_x0 + x, reference_y0 + y, swap_images);
+if (p.weighted_sad != 0)
+{
+sad += compute_weighted_ycbcr_sad_sample(current_rgb, reference_rgb);
+}
+else
+{
 vec3 diff = abs(current_rgb - reference_rgb);
 sad += round_positive((diff.r + diff.g + diff.b) * p.max_sample);
+}
 }
 }
 }
@@ -209,8 +237,15 @@ if (p.use_chroma != 0)
 {
 vec3 current_rgb = load_sad_current_rgb(current_x, current_y, swap_images);
 vec3 reference_rgb = load_sad_reference_rgb(reference_x, reference_y, swap_images);
+if (p.weighted_sad != 0)
+{
+sad += compute_weighted_ycbcr_sad_sample(current_rgb, reference_rgb);
+}
+else
+{
 vec3 diff = abs(current_rgb - reference_rgb);
 sad += round_positive((diff.r + diff.g + diff.b) * p.max_sample);
+}
 }
 else
 {

@@ -75,8 +75,11 @@ struct RIFEGpuMotionVectorConfig final {
     int blockReduce;
     int bits;
     int useChroma;
+    int weightedSad;
     float motionScaleX;
     float motionScaleY;
+    float sadY;
+    float sadUV;
 };
 
 struct RIFEGpuMotionVector final {
@@ -127,12 +130,20 @@ public:
     int process_motion_vectors_gpu(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
                                    RIFEGpuMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
                                    FlowPerfBreakdown* perf = nullptr) const;
+    int process_motion_vectors_gpu(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                   const ncnn::Mat& sadSrc0Packed, const ncnn::Mat& sadSrc1Packed,
+                                   RIFEGpuMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
+                                   FlowPerfBreakdown* perf = nullptr) const;
     int process_motion_vectors_gpu_packed(const float* src0R, const float* src0G, const float* src0B,
                                           const float* src1R, const float* src1G, const float* src1B,
                                           RIFEGpuPackedMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
                                           const int w, const int h, const ptrdiff_t stride,
                                           FlowPerfBreakdown* perf = nullptr) const;
     int process_motion_vectors_gpu_packed(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                          RIFEGpuPackedMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
+                                          FlowPerfBreakdown* perf = nullptr) const;
+    int process_motion_vectors_gpu_packed(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
+                                          const ncnn::Mat& sadSrc0Packed, const ncnn::Mat& sadSrc1Packed,
                                           RIFEGpuPackedMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
                                           FlowPerfBreakdown* perf = nullptr) const;
 
@@ -144,7 +155,9 @@ private:
                               const RIFEGpuMotionVectorConfig* vectorConfig,
                               const int w, const int h, const ptrdiff_t stride,
                               const ncnn::Mat* src0Packed, const ncnn::Mat* src1Packed,
-                              FlowPerfBreakdown* perf = nullptr) const;
+                              FlowPerfBreakdown* perf = nullptr,
+                              const ncnn::Mat* sadSrc0Packed = nullptr,
+                              const ncnn::Mat* sadSrc1Packed = nullptr) const;
 
     ncnn::VulkanDevice* vkdev;
     ncnn::Net flownet;
