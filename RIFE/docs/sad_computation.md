@@ -1,6 +1,6 @@
 # Synthetic SAD computation
 
-`SAD` means sum of absolute differences. This plugin does not get a matching cost from RIFE itself, so it synthesizes the MVTools `sad` field after a motion vector has already been chosen from RIFE flow or from a composed displacement field.
+`SAD` means sum of absolute differences. This plugin does not get a matching cost from RIFE itself, so it synthesizes the MVTools `sad` field after a motion vector has already been chosen from RIFE flow.
 
 ## Scope
 
@@ -9,20 +9,14 @@ The same `sad` formula is used in all vector-export paths:
 - `RIFEMV()`: two-output API that returns both backward and forward vector clips
 - `buildMVToolsVectorBlob()`: helper that converts one frame pair plus motion data into the binary MVTools vector blob, including `x`, `y`, and `sad` for each block
 - `buildMotionVectorBlobFromConfig()`: thin wrapper that builds the same blob using a `MotionVectorConfig` settings object
-- `RIFEMVApprox2()` / `RIFEMVApprox3()`: approximate exporters for larger temporal distances, built by composing 2 or 3 adjacent motions
-- `buildMotionVectorBlobFromDisplacement()`: helper that builds the blob from already-composed pixel displacements instead of directly from raw flow
-
-Only the way `pixelDx` and `pixelDy` are obtained differs.
 
 ## Name glossary
 
 - `round(x)`: C++ `std::lround`, meaning nearest integer with halfway cases rounded away from zero
 - `clamp(x, lo, hi)`: limit `x` to the closed interval `[lo, hi]`
 - `clampPixel(...)`: frame-edge clamp used for pixel coordinates, so any out-of-range access reads the nearest border pixel
-- `bilinearSample(...)`: bilinear interpolation on one float plane after clamping the sample position to the frame bounds
 - `luma(r, g, b)`: Rec.709 luma computed as `0.2126 * r + 0.7152 * g + 0.0722 * b`
 - `flowX`, `flowY`: horizontal and vertical motion read from the RIFE flow tensor
-- `dispX`, `dispY`: horizontal and vertical motion expressed in pixel units rather than raw flow units
 - `vx`, `vy`: final stored MVTools vector components, in units of `1 / pel` pixels
 - `pixelDx`, `pixelDy`: whole-pixel offsets derived from `vx` and `vy`, used only when computing synthetic SAD
 
@@ -57,7 +51,7 @@ clampPixel(v, limit) = min(max(v, 0), limit - 1)
 
 ## Motion vector to pixel displacement
 
-### Direct flow path
+### Flow path
 
 For normal export, a block vector is obtained by reducing the flow plane on the inference lattice. If `res_scale != 1.0`, RIFE runs on the resized inference clip and the block reduction uses an internal block geometry derived from that inference size. After reduction, horizontal motion is scaled by `sourceWidth / inferenceWidth` and vertical motion by `sourceHeight / inferenceHeight` so the exported vectors are back in source-pixel units. The block reduction is:
 
@@ -89,44 +83,6 @@ vy = clamp(vy, minDy, maxDy)
 ```
 
 The synthetic SAD uses whole-pixel offsets derived from the clamped vector. This means the stored vector may keep subpixel precision through `pel`, but the actual synthetic SAD lookup always compares integer pixel positions:
-
-```text
-pixelDx = round(vx / pel)
-pixelDy = round(vy / pel)
-```
-
-### Approximate displacement path
-
-For `RIFEMVApprox2/3`, each adjacent-pair flow field is first converted to displacement on the inference lattice, meaning motion measured directly in inference-frame pixels:
-
-```text
-dispX = -2 * flowX
-dispY = -2 * flowY
-```
-
-Multiple displacement fields are composed in sequence. Starting from the first field:
-
-```text
-composedX = dispX[0]
-composedY = dispY[0]
-
-for each later field i:
-    sampleX = x + composedX[x, y]
-    sampleY = y + composedY[x, y]
-    composedX[x, y] += bilinearSample(dispX[i], sampleX, sampleY)
-    composedY[x, y] += bilinearSample(dispY[i], sampleX, sampleY)
-```
-
-The bilinear sampler clamps sample coordinates to the frame before interpolation. Here `sampleX` and `sampleY` are floating-point lookup positions reached by following the already-composed motion.
-
-Block reduction is then applied directly to `composedX` and `composedY` on the inference lattice. The reduced block displacement is then scaled back to source-pixel units before export. `pixelBlockDx` and `pixelBlockDy` mean the reduced horizontal and vertical block displacements measured in source pixels after scaling. Exported vectors are:
-
-```text
-vx = round(pixelBlockDx * pel)
-vy = round(pixelBlockDy * pel)
-```
-
-The same vector clamp is applied as above, and the whole-pixel offsets used by the SAD are again:
 
 ```text
 pixelDx = round(vx / pel)
@@ -214,7 +170,7 @@ Because MVTools performs its own block-size normalization internally, changing t
 
 ## Gray8 carrier SAD mask
 
-The public vector clips returned by `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3` are `Gray8` carrier clips. Their MVTools compatibility still comes entirely from frame properties, but the exposed pixel plane is now populated with a direction-specific SAD mask instead of dummy zeroes.
+The public vector clips returned by `RIFEMV` are `Gray8` carrier clips. Their MVTools compatibility still comes entirely from frame properties, but the exposed pixel plane is now populated with a direction-specific SAD mask instead of dummy zeroes.
 
 The mask is generated from the selected direction's exported finest-plane block `sad` values already stored in `MVTools_vectors`. The pixel plane does not use `RMV_AvgSad`, `RMV_AvgSadNorm`, or any other summary property.
 

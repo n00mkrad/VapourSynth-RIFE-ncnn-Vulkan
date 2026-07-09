@@ -16,12 +16,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `rmv.RIFEMV(...)`
   Returns both backward and forward vector clips from one inference pass.
 
-- `rmv.RIFEMVApprox2(...)`
-  Returns approximate vectors for deltas 1 and 2 by composing adjacent motions.
-
-- `rmv.RIFEMVApprox3(...)`
-  Returns approximate vectors for deltas 1, 2, and 3 by composing adjacent motions.
-
 - `rmv.CropGrid(...)`
   Crops MVTools-compatible vector clips and matching `mv.Super` clips on the vector block-step grid.
 
@@ -68,7 +62,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `gpu_mode`
   Manual export backend used by `RIFEMV` after RIFE has produced optical flow.
   Default: `0`.
-  This argument is not exposed by `RIFEMVApprox2` or `RIFEMVApprox3`.
   Accepted values:
   - `0` (`cpu`) reads dense flow back to CPU and performs block reduction, vector conversion, SAD, stats, and blob packing on CPU. This is the safest compatibility path.
   - `1` (`gpu_flow_reduce`) performs dense-flow-to-block-flow reduction on GPU, then reads back compact per-block flow. CPU still performs vector conversion, SAD, stats, and blob packing.
@@ -80,14 +73,12 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 
 - `shared_flow_inflight`
   Global in-flight cap for motion-vector flow inference shared across filter instances on the same GPU.
-  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
   Default: GPU compute queue count.
   Lower values can reduce CPU contention; higher values can increase throughput on some setups.
   When explicitly set, local admission is relaxed to at least this value (`max(gpu_thread, shared_flow_inflight)`) so the shared cap remains the primary limiter.
 
 - `shared_luma_cache`
   Controls whether source-frame luma planes are shared across compatible filter instances.
-  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
   Default: `True`.
   `True` / `1` enables automatic sharing for the same logical source clip when synthetic SAD is computed from luma.
   `False` / `0` disables cross-instance sharing and keeps only the local per-instance cache.
@@ -96,7 +87,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 
 - `shared_packed_cache`
   Controls whether prepacked inference RGB frames are shared across compatible filter instances.
-  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
   Default: `True`.
   `True` / `1` enables cross-instance sharing for the same logical source clip and inference setup.
   `False` / `0` keeps packed-frame reuse local to the current filter instance only.
@@ -104,7 +94,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 
 - `packed_cache_mib`
   Memory budget (MiB) for packed inference-frame cache entries.
-  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
   Default: `256`.
   Must be greater than `0`.
   This cache only targets CPU-side inference-input repacking overhead and does not change vector/SAD semantics.
@@ -153,13 +142,11 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 
 - `sad_stats`
   Controls whether SAD summary frame properties are computed and attached.
-  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
   Default: `False`.
   If enabled, `RMV_AvgSad`, `RMV_MaxSad`, and `RMV_MinSad` are attached.
 
 - `motion_stats`
   Controls whether motion summary frame properties are computed and attached.
-  This affects `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3`.
   Default: `False`.
   If enabled, `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` are attached.
 
@@ -219,11 +206,11 @@ For `mv.Super` clips, pass the Super clip as `clip` and a matching vector clip a
 sup_crop = core.rmv.CropGrid(sup, left=1, right=1, vectors=mvfw)
 ```
 
-`CropGrid` v1 supports single-level vector clips, which matches the output from this plugin's `RIFEMV`, `RIFEMVApprox2`, and `RIFEMVApprox3` functions. Native multi-level MVTools vector clips are rejected.
+`CropGrid` v1 supports single-level vector clips, which matches the output from this plugin's `RIFEMV` function. Native multi-level MVTools vector clips are rejected.
 
 ## `rmv.RIFEMV`
 
-`rmv.RIFEMV` is the convenience function for the common delta-1 case.
+`rmv.RIFEMV` exports both motion-vector directions for one configured temporal distance.
 
 ### Signature
 
@@ -281,57 +268,33 @@ mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, sad_clip=sad_ref)
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
 mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=rife_mdl, pel=1, hpad=0, vpad=0)
 
-den = core.mv.Degrain1(clip, sup, mvbw, mvfw, thsad=500)
+den = core.mv.Degrain1(clip, sup, mvbw, mvfw, thsad=500, sad_center=1, sad_center_floor=0.15)
 ```
 
 When using MVTools consumers that depend on `pel`, `hpad`, or `vpad`, keep those values aligned between `mv.Super(...)` and the RIFE exporter.
 
-## `rmv.RIFEMVApprox2` and `rmv.RIFEMVApprox3`
+`sad_center=1` changes only Degrain's per-block reference weighting. It computes a luma SAD after subtracting each matched block's mean luma difference, which keeps broad illumination changes from giving clean vectors zero weight. Scene detection still uses the original vector SAD, so `thscd1` and `thscd2` retain their usual behavior.
 
-These functions generate approximate larger-delta motion by composing adjacent frame-to-frame displacements.
+`sad_center_floor` defaults to `0.0` and is limited to `[0.0, 1.0]`. It applies a lower bound derived from the original vector SAD: `0.0` uses the centered score capped at raw SAD, while `1.0` restores native SAD weighting. A positive floor requires `sad_center=1`.
 
-They are useful when you want delta-2 or delta-3 vectors without running separate direct exporters for each temporal distance.
+The super clip must include luma when `sad_center=1`. The output frame properties `MVTools_SADCenterAvg` and `MVTools_SADCenterMax` report the aggregate effective weighting SAD in MVTools' 8x8, 8-bit-equivalent threshold space.
 
-### `RIFEMVApprox2`
+## Multiple temporal distances
 
-```python
-outputs = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl)
-```
-
-Output order:
+Run one `RIFEMV` instance for each temporal distance you need:
 
 ```python
-bw1, fw1, bw2, fw2 = core.rmv.RIFEMVApprox2(...)
+bw1, fw1 = core.rmv.RIFEMV(clip, model_path=rife_mdl, delta=1)
+bw2, fw2 = core.rmv.RIFEMV(clip, model_path=rife_mdl, delta=2)
+bw3, fw3 = core.rmv.RIFEMV(clip, model_path=rife_mdl, delta=3)
 ```
-
-- `bw1`, `fw1`: approximate delta-1 vectors
-- `bw2`, `fw2`: approximate delta-2 vectors
-
-### `RIFEMVApprox3`
-
-```python
-outputs = core.rmv.RIFEMVApprox3(clip, model_path=rife_mdl)
-```
-
-Output order:
-
-```python
-bw1, fw1, bw2, fw2, bw3, fw3 = core.rmv.RIFEMVApprox3(...)
-```
-
-- `bw1`, `fw1`: approximate delta-1 vectors
-- `bw2`, `fw2`: approximate delta-2 vectors
-- `bw3`, `fw3`: approximate delta-3 vectors
-
-### Shared arguments
-
-`RIFEMVApprox2` and `RIFEMVApprox3` accept the same arguments as `RIFEMV`, except they do not expose `delta` because each function has a fixed maximum delta built into it, they do not expose `gpu_mode` because the approximation path still requires dense displacement data, and they do not expose `sad_y` / `sad_uv` because weighted synthetic Y/Cb/Cr SAD is currently limited to the GPU-full path.
 
 ### Example with Degrain2
 
 ```python
 sup = core.mv.Super(clip, pel=1, hpad=0, vpad=0, levels=1)
-bw1, fw1, bw2, fw2 = core.rmv.RIFEMVApprox2(clip, model_path=rife_mdl)
+bw1, fw1 = core.rmv.RIFEMV(clip, model_path=rife_mdl, delta=1)
+bw2, fw2 = core.rmv.RIFEMV(clip, model_path=rife_mdl, delta=2)
 
 den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 ```
@@ -344,7 +307,7 @@ den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 - Keep `pel`, `hpad`, and `vpad` consistent with the `mv.Super` clip you use downstream.
 - If a function only needs one direction, call `rmv.RIFEMV(...)` and use either `mvbw` or `mvfw`.
 - If you need both directions for delta 1, prefer `rmv.RIFEMV(...)`.
-- If you need approximate delta 2 or 3 vectors, use `rmv.RIFEMVApprox2(...)` or `rmv.RIFEMVApprox3(...)`.
+- If you need several temporal distances, run one `rmv.RIFEMV(...)` instance for each `delta`.
 
 ## Summary
 

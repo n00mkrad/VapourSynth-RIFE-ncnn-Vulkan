@@ -16,8 +16,6 @@ Mode mapping:
 - `2` = `gpu_full`
 - `3` = `gpu_full_packed`
 
-`RIFEMVApprox2` and `RIFEMVApprox3` do not expose this option. They currently need dense displacement data for temporal composition, so they use the dense CPU export path internally.
-
 ## Mode Summary
 
 | Mode | Dense flow readback | GPU work after RIFE | CPU work after readback | Current status |
