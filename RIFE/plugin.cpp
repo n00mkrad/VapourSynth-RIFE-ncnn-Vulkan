@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -22,6 +23,12 @@
 #include <unordered_map>
 #include <vector>
 #include <iostream>
+#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#include <emmintrin.h>
+#define RIFEMV_HAS_SSE2 1
+#else
+#define RIFEMV_HAS_SSE2 0
+#endif
 #include "VapourSynth4.h"
 #include "VSHelper4.h"
 
@@ -375,6 +382,10 @@ static_assert(sizeof(MVToolsVector) == 16);
 static_assert(sizeof(RIFEGpuMotionVector) == 16);
 static_assert(sizeof(RIFEGpuPackedMotionVector) == 8);
 static_assert(sizeof(MVAnalysisData) == 84);
+static_assert(offsetof(MVToolsVector, x) == offsetof(RIFEGpuMotionVector, x));
+static_assert(offsetof(MVToolsVector, y) == offsetof(RIFEGpuMotionVector, y));
+static_assert(offsetof(MVToolsVector, sad) == offsetof(RIFEGpuMotionVector, rawSad));
+static_assert(offsetof(RIFEGpuMotionVector, reserved) == offsetof(MVToolsVector, sad) + sizeof(uint32_t));
 
 static int64_t monotonicNowNs() noexcept {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2029,6 +2040,8 @@ struct RIFEMVPairData final {
     bool motionStats;
     bool perfStats;
     bool sourceMatchesInference;
+    int absSadClipRange;
+    bool renderSadMask;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
 };
@@ -2372,9 +2385,7 @@ static void packMotionVectorBlob(const std::vector<MVToolsVector>& vectors, cons
         *stats = computeMotionVectorFrameStats(vectors, analysisData, includeSadStats, includeMotionStats);
 }
 
-template <typename VectorReader>
-static void packMotionVectorBlobDirect(const size_t vectorCount, const bool valid, const int64_t invalidSad,
-                                       std::vector<char>& blob, VectorReader&& readVector) {
+static char* prepareMotionVectorBlob(const size_t vectorCount, const bool valid, std::vector<char>& blob) {
     const auto planeSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) + vectorCount * sizeof(MVToolsVector));
     const auto groupSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2 + planeSize);
     blob.resize(groupSize);
@@ -2387,6 +2398,13 @@ static void packMotionVectorBlobDirect(const size_t vectorCount, const bool vali
     writeScalar(groupSize);
     writeScalar(valid ? MVArraySizeType{ 1 } : MVArraySizeType{ 0 });
     writeScalar(planeSize);
+    return output;
+}
+
+template <typename VectorReader>
+static void packMotionVectorBlobDirect(const size_t vectorCount, const bool valid, const int64_t invalidSad,
+                                       std::vector<char>& blob, VectorReader&& readVector) {
+    auto* output = prepareMotionVectorBlob(vectorCount, valid, blob);
     for (size_t i = 0; i < vectorCount; i++) {
         const auto vector = valid ? readVector(i) : MVToolsVector{ 0, 0, invalidSad };
         std::memcpy(output, &vector, sizeof(vector));
@@ -2819,14 +2837,19 @@ static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuV
     if (!includeSadStats && !includeMotionStats) {
         const auto* backwardGpuVectors = gpuVectors;
         const auto* forwardGpuVectors = gpuVectors + vectorCount;
-        const auto packDirection = [&](const RIFEGpuMotionVector* source, const bool backward, std::vector<char>& blob) {
-            packMotionVectorBlobDirect(vectorCount, valid, config.invalidSad, blob,
-                                       [source](const size_t i) {
-                                           return MVToolsVector{ source[i].x, source[i].y, static_cast<int64_t>(source[i].rawSad) };
-                                       });
+        const auto packDirection = [&](const RIFEGpuMotionVector* source, std::vector<char>& blob) {
+            if (!valid) {
+                packMotionVectorBlobDirect(vectorCount, false, config.invalidSad, blob,
+                                           [](const size_t) { return MVToolsVector{}; });
+                return;
+            }
+
+            // gpu_full writes x/y, the low SAD word, and a zero high SAD word, matching MVToolsVector exactly.
+            auto* output = prepareMotionVectorBlob(vectorCount, true, blob);
+            std::memcpy(output, source, vectorCount * sizeof(MVToolsVector));
         };
-        packDirection(backwardGpuVectors, true, backwardBlob);
-        packDirection(forwardGpuVectors, false, forwardBlob);
+        packDirection(backwardGpuVectors, backwardBlob);
+        packDirection(forwardGpuVectors, forwardBlob);
         return;
     }
 
@@ -2861,6 +2884,31 @@ static int decodePackedMotionVectorComponent(const uint32_t value) noexcept {
     return (bits & 0x8000u) != 0 ? static_cast<int>(bits) - 0x10000 : static_cast<int>(bits);
 }
 
+static void packValidGpuPackedMotionVectorBlob(const RIFEGpuPackedMotionVector* const source, const size_t vectorCount, std::vector<char>& blob) {
+    auto* output = prepareMotionVectorBlob(vectorCount, true, blob);
+    size_t i{};
+#if RIFEMV_HAS_SSE2
+    // Expand two packed vectors into two byte-compatible MVTools records per iteration.
+    const auto sadWordMask = _mm_set_epi32(0, -1, 0, -1);
+    for (; i + 1 < vectorCount; i += 2) {
+        const auto input = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + i));
+        const auto packedXY = _mm_shuffle_epi32(input, _MM_SHUFFLE(2, 0, 2, 0));
+        const auto signedXY = _mm_unpacklo_epi16(packedXY, _mm_srai_epi16(packedXY, 15));
+        const auto sadWords = _mm_and_si128(_mm_shuffle_epi32(input, _MM_SHUFFLE(3, 3, 1, 1)), sadWordMask);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(output + i * sizeof(MVToolsVector)), _mm_unpacklo_epi64(signedXY, sadWords));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(output + (i + 1) * sizeof(MVToolsVector)), _mm_unpackhi_epi64(signedXY, sadWords));
+    }
+#endif
+    for (; i < vectorCount; i++) {
+        const auto vector = MVToolsVector{
+            decodePackedMotionVectorComponent(source[i].packedXY),
+            decodePackedMotionVectorComponent(source[i].packedXY >> 16),
+            static_cast<int64_t>(source[i].rawSad)
+        };
+        std::memcpy(output + i * sizeof(MVToolsVector), &vector, sizeof(vector));
+    }
+}
+
 static void buildMotionVectorBlobsFromGpuPackedVectors(const RIFEGpuPackedMotionVector* gpuVectors,
                                                        const bool valid, const MotionVectorConfig& config,
                                                        std::vector<MVToolsVector>& backwardVectors,
@@ -2881,12 +2929,16 @@ static void buildMotionVectorBlobsFromGpuPackedVectors(const RIFEGpuPackedMotion
     if (!includeSadStats && !includeMotionStats) {
         const auto* backwardGpuVectors = gpuVectors;
         const auto* forwardGpuVectors = gpuVectors + vectorCount;
-        const auto packDirection = [&](const RIFEGpuPackedMotionVector* source, const bool backward, std::vector<char>& blob) {
-            packMotionVectorBlobDirect(vectorCount, valid, config.invalidSad, blob,
-                                       [source, &unpackVector](const size_t i) { return unpackVector(source[i]); });
+        const auto packDirection = [&](const RIFEGpuPackedMotionVector* source, std::vector<char>& blob) {
+            if (valid) {
+                packValidGpuPackedMotionVectorBlob(source, vectorCount, blob);
+                return;
+            }
+            packMotionVectorBlobDirect(vectorCount, false, config.invalidSad, blob,
+                                       [](const size_t) { return MVToolsVector{}; });
         };
-        packDirection(backwardGpuVectors, true, backwardBlob);
-        packDirection(forwardGpuVectors, false, forwardBlob);
+        packDirection(backwardGpuVectors, backwardBlob);
+        packDirection(forwardGpuVectors, forwardBlob);
         return;
     }
 
@@ -3349,12 +3401,6 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
         const VSFrame* referenceSource = n + delta < d->vi.numFrames ?
             (d->sourceMatchesInference ? vsapi->addFrameRef(reference) : vsapi->getFrameFilter(n + delta, d->sourceNode, frameCtx)) : nullptr;
 
-        const auto pairCarrierStartNs = d->perfStats ? monotonicNowNs() : 0;
-        auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
-        zeroMotionVectorFrame(dst, d->vi, vsapi);
-        if (d->perfStats)
-            accumulatePerfStat(d->perf->pairCarrierNs, monotonicNowNs() - pairCarrierStartNs);
-        auto props = vsapi->getFramePropertiesRW(dst);
         auto& scratch = getMotionVectorScratchBuffers();
 
         auto& backwardVectors = scratch.backwardVectors;
@@ -3506,7 +3552,6 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                 vsapi->freeFrame(reference);
                 vsapi->freeFrame(currentSource);
                 vsapi->freeFrame(referenceSource);
-                vsapi->freeFrame(dst);
                 vsapi->setFilterError("RIFEMV: failed to export motion vectors", frameCtx);
                 return nullptr;
             }
@@ -3564,13 +3609,27 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                             needStats ? &forwardStats : nullptr, d->sadStats, d->motionStats);
         }
 
-        const auto pairPropertyStartNs = d->perfStats ? monotonicNowNs() : 0;
-        vsapi->mapSetData(props, RIFEMVBackwardVectorsInternalKey, backwardBlob.data(), static_cast<int>(backwardBlob.size()), dtBinary, maReplace);
-        vsapi->mapSetData(props, RIFEMVForwardVectorsInternalKey, forwardBlob.data(), static_cast<int>(forwardBlob.size()), dtBinary, maReplace);
-        if (needStats) {
-            setMotionVectorInternalFrameStats(props, backwardStats, d->sadStats, d->motionStats, true, vsapi);
-            setMotionVectorInternalFrameStats(props, forwardStats, d->sadStats, d->motionStats, false, vsapi);
+        const auto pairCarrierStartNs = d->perfStats ? monotonicNowNs() : 0;
+        auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
+        if (d->renderSadMask) {
+            const auto renderSadMaskStartNs = d->perfStats ? monotonicNowNs() : 0;
+            renderMotionVectorSADMask(dst, d->vi, backwardBlob.data(), static_cast<int>(backwardBlob.size()),
+                                      d->mvConfig.backwardAnalysisData, d->absSadClipRange, vsapi);
+            if (d->perfStats)
+                accumulatePerfStat(d->perf->renderSadMaskNs, monotonicNowNs() - renderSadMaskStartNs);
+        } else {
+            zeroMotionVectorFrame(dst, d->vi, vsapi);
         }
+        if (d->perfStats)
+            accumulatePerfStat(d->perf->pairCarrierNs, monotonicNowNs() - pairCarrierStartNs);
+
+        auto props = vsapi->getFramePropertiesRW(dst);
+        const auto pairPropertyStartNs = d->perfStats ? monotonicNowNs() : 0;
+        setMotionVectorProperties(props, d->mvConfig.backwardAnalysisData, backwardBlob.data(), static_cast<int>(backwardBlob.size()),
+                                  backwardStats, d->sadStats, d->motionStats, vsapi);
+        vsapi->mapSetData(props, RIFEMVForwardVectorsInternalKey, forwardBlob.data(), static_cast<int>(forwardBlob.size()), dtBinary, maReplace);
+        if (needStats)
+            setMotionVectorInternalFrameStats(props, forwardStats, d->sadStats, d->motionStats, false, vsapi);
         if (d->perfStats)
             accumulatePerfStat(d->perf->pairPropertyNs, monotonicNowNs() - pairPropertyStartNs);
 
@@ -3827,7 +3886,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     auto pairData{ std::make_unique<RIFEMVPairData>() };
     VSNode* sadInputNode{};
     VSNode* pairNode{};
-    VSNode* backwardNode{};
     VSNode* forwardNode{};
     bool hasGPUInstance{};
     int mvAbsSADClipRange{};
@@ -4073,6 +4131,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         pairData->sadStats = mvSadStats;
         pairData->motionStats = mvMotionStats;
         pairData->perfStats = perfStats;
+        pairData->absSadClipRange = mvAbsSADClipRange;
+        pairData->renderSadMask = mvRenderSadMask;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
             pairData->perfLabel = "RIFEMV(delta=" + std::to_string(pairData->mvConfig.delta) + ")";
@@ -4105,8 +4165,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     const auto mvConfig = pairData->mvConfig;
     const auto mvPerfStatsEnabled = pairData->perfStats;
     const auto mvPerf = pairData->perf;
-    pairData->vi.width = 1;
-    pairData->vi.height = 1;
     VSFilterDependency pairDeps[]{ { pairData->node, rpGeneral }, { pairData->sourceNode, rpGeneral } };
     const auto pairDependencyCount = pairData->sourceMatchesInference ? 1 : 2;
     pairNode = vsapi->createVideoFilter2("RIFEMVPair", &pairData->vi, rifeMVPairGetFrame, rifeMVPairFree, fmParallel,
@@ -4120,31 +4178,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         return;
     }
     pairData.release();
-
-    auto backwardData = std::make_unique<RIFEMVOutputData>();
-    backwardData->node = vsapi->addNodeRef(pairNode);
-    backwardData->vi = outputVi;
-    backwardData->analysisData = mvConfig.backwardAnalysisData;
-    backwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, true,
-                                                             (mvSadStats || mvMotionStats) ? &backwardData->invalidStats : nullptr,
-                                                             mvSadStats, mvMotionStats);
-    backwardData->absSadClipRange = mvAbsSADClipRange;
-    backwardData->backward = true;
-    backwardData->renderSadMask = mvRenderSadMask;
-    backwardData->sadStats = mvSadStats;
-    backwardData->motionStats = mvMotionStats;
-    backwardData->perfStats = mvPerfStatsEnabled;
-    backwardData->perf = mvPerf;
-    VSFilterDependency backwardDeps[]{ { backwardData->node, rpGeneral } };
-    backwardNode = vsapi->createVideoFilter2("RIFEMVBackward", &backwardData->vi, rifeMVOutputGetFrame, rifeMVOutputFree,
-                                             fmParallel, backwardDeps, 1, backwardData.get(), core);
-    if (!backwardNode) {
-        vsapi->mapSetError(out, "RIFEMV: failed to create backward output filter");
-        vsapi->freeNode(backwardData->node);
-        vsapi->freeNode(pairNode);
-        return;
-    }
-    backwardData.release();
 
     auto forwardData = std::make_unique<RIFEMVOutputData>();
     forwardData->node = vsapi->addNodeRef(pairNode);
@@ -4166,14 +4199,12 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     if (!forwardNode) {
         vsapi->mapSetError(out, "RIFEMV: failed to create forward output filter");
         vsapi->freeNode(forwardData->node);
-        vsapi->freeNode(backwardNode);
         vsapi->freeNode(pairNode);
         return;
     }
     forwardData.release();
 
-    vsapi->freeNode(pairNode);
-    vsapi->mapConsumeNode(out, "clip", backwardNode, maAppend);
+    vsapi->mapConsumeNode(out, "clip", pairNode, maAppend);
     vsapi->mapConsumeNode(out, "clip", forwardNode, maAppend);
 }
 
