@@ -48,10 +48,18 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     enable_gpu_mv_full = _enable_gpu_mv_full;
     padding = _padding;
     rife_v4_flow_blob_name.clear();
+    if (vkdev && enable_gpu_mv_full)
+        gpu_input_cache_allocator = std::make_unique<ncnn::VkBlobAllocator>(vkdev, 64u * 1024u * 1024u);
 }
 
 RIFE::~RIFE()
 {
+    {
+        std::lock_guard<std::mutex> lock(gpu_input_cache_mutex);
+        gpu_input_cache.clear();
+    }
+    gpu_input_cache_allocator.reset();
+
     delete rife_preproc;
     delete rife_v4_timestep;
     delete rife_mv_reduce;
@@ -850,6 +858,15 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
     if (collect_perf)
         *perf = {};
 
+    std::unique_lock<std::mutex> gpu_input_cache_process_lock(gpu_input_cache_process_mutex, std::defer_lock);
+    if (gpu_input_cache_allocator && src0_packed && src1_packed)
+    {
+        const auto gpu_input_cache_wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
+        gpu_input_cache_process_lock.lock();
+        if (collect_perf)
+            perf->gpuInputCacheWaitNs += monotonic_now_ns() - gpu_input_cache_wait_start_ns;
+    }
+
     const auto setup_start_ns = collect_perf ? monotonic_now_ns() : 0;
     const int channels = 3;
 
@@ -935,20 +952,77 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         perf->cpuPrepNs += monotonic_now_ns() - cpu_prep_start_ns;
 
     ncnn::VkCompute cmd(vkdev);
+    constexpr uint32_t gpu_timestamp_count = 7;
+    const bool collect_gpu_perf = collect_perf && cmd.create_query_pool(gpu_timestamp_count) == 0;
+    const auto record_gpu_timestamp = [&](const uint32_t query) {
+        if (collect_gpu_perf)
+            cmd.record_write_timestamp(query);
+    };
     const auto command_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
+
+    struct PendingGpuInputCacheEntry final {
+        ncnn::Mat source;
+        ncnn::VkMat gpu;
+    };
+    std::vector<PendingGpuInputCacheEntry> pending_gpu_input_cache_entries;
+    const auto use_gpu_input_cache = gpu_input_cache_allocator && src0_packed && src1_packed;
+    const auto upload_input = [&](const ncnn::Mat& input, ncnn::VkMat& output) {
+        const auto matchesInput = [&input](const GpuInputCacheEntry& entry) {
+            return entry.source.data == input.data &&
+                   entry.source.w == input.w && entry.source.h == input.h && entry.source.c == input.c &&
+                   entry.source.elemsize == input.elemsize && entry.source.elempack == input.elempack;
+        };
+        if (!use_gpu_input_cache) {
+            cmd.record_clone(input, output, opt);
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(gpu_input_cache_mutex);
+            const auto it = std::find_if(gpu_input_cache.begin(), gpu_input_cache.end(), matchesInput);
+            if (it != gpu_input_cache.end()) {
+                output = it->gpu;
+                it->lastUse = ++gpu_input_cache_clock;
+                if (collect_perf)
+                    perf->gpuInputCacheHits++;
+                return;
+            }
+        }
+        for (const auto& entry : pending_gpu_input_cache_entries) {
+            if (matchesInput({ entry.source, entry.gpu, 0 })) {
+                output = entry.gpu;
+                if (collect_perf)
+                    perf->gpuInputCacheHits++;
+                return;
+            }
+        }
+
+        ncnn::Option cache_opt = opt;
+        cache_opt.blob_vkallocator = gpu_input_cache_allocator.get();
+        cache_opt.workspace_vkallocator = gpu_input_cache_allocator.get();
+        {
+            std::lock_guard<std::mutex> lock(gpu_input_cache_mutex);
+            cmd.record_clone(input, output, cache_opt);
+        }
+        pending_gpu_input_cache_entries.push_back({ input, output });
+        if (collect_perf)
+            perf->gpuInputCacheMisses++;
+    };
 
     ncnn::VkMat in0_gpu;
     ncnn::VkMat in1_gpu;
     ncnn::VkMat sad_in0_gpu;
     ncnn::VkMat sad_in1_gpu;
     const auto upload_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    cmd.record_clone(in0, in0_gpu, opt);
-    cmd.record_clone(in1, in1_gpu, opt);
+    record_gpu_timestamp(0);
+    upload_input(in0, in0_gpu);
+    upload_input(in1, in1_gpu);
     if (sad_src0_packed && sad_src1_packed)
     {
-        cmd.record_clone(*sad_src0_packed, sad_in0_gpu, opt);
-        cmd.record_clone(*sad_src1_packed, sad_in1_gpu, opt);
+        upload_input(*sad_src0_packed, sad_in0_gpu);
+        upload_input(*sad_src1_packed, sad_in1_gpu);
     }
+    record_gpu_timestamp(1);
     if (collect_perf)
         perf->uploadRecordNs += monotonic_now_ns() - upload_record_start_ns;
 
@@ -989,6 +1063,7 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
 
         cmd.record_pipeline(rife_preproc, bindings, constants, in1_gpu_padded);
     }
+    record_gpu_timestamp(2);
     if (collect_perf)
         perf->preprocRecordNs += monotonic_now_ns() - preproc_record_start_ns;
 
@@ -1053,6 +1128,7 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         if (collect_perf)
             perf->inferenceRecordNs += monotonic_now_ns() - inference_record_start_ns;
     }
+    record_gpu_timestamp(3);
 
     ncnn::VkMat flow_readback_source = flow;
     ncnn::VkMat flow_staging;
@@ -1080,6 +1156,7 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
 
     if (!used_gpu_resize && require_gpu_resize)
         return finish(-1);
+    record_gpu_timestamp(4);
 
     const auto reduced_output = reduce_config != nullptr;
     const auto vector_output = vector_config != nullptr;
@@ -1189,16 +1266,19 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         constants[30].f = 0.0f;
         constants[31].f = 0.0f;
 
-        cmd.record_pipeline(rife_mv_full, bindings, constants, vectors_gpu);
+        ncnn::Mat vector_dispatcher(block_count, static_cast<void*>(nullptr));
+        cmd.record_pipeline(rife_mv_full, bindings, constants, vector_dispatcher);
         flow_readback_source = vectors_gpu;
         if (collect_perf)
             perf->flowVectorRecordNs += monotonic_now_ns() - vector_record_start_ns;
     }
+    record_gpu_timestamp(5);
 
     ncnn::Option opt_staging = opt;
     opt_staging.blob_vkallocator = staging_vkallocator;
     const auto readback_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
     cmd.record_clone(flow_readback_source, flow_staging, opt_staging);
+    record_gpu_timestamp(6);
     if (collect_perf)
         perf->readbackRecordNs += monotonic_now_ns() - readback_record_start_ns;
     if (flow_staging.empty())
@@ -1215,6 +1295,53 @@ int RIFE::process_flow_internal(const float* src0R, const float* src0G, const fl
         return finish(-1);
     if (collect_perf)
         perf->submitWaitNs += monotonic_now_ns() - submit_wait_start_ns;
+    if (use_gpu_input_cache && !pending_gpu_input_cache_entries.empty())
+    {
+        constexpr size_t gpu_input_cache_capacity = 8;
+        std::lock_guard<std::mutex> lock(gpu_input_cache_mutex);
+        for (auto& pending : pending_gpu_input_cache_entries)
+        {
+            const auto it = std::find_if(gpu_input_cache.begin(), gpu_input_cache.end(), [&pending](const GpuInputCacheEntry& entry) {
+                return entry.source.data == pending.source.data &&
+                       entry.source.w == pending.source.w && entry.source.h == pending.source.h && entry.source.c == pending.source.c &&
+                       entry.source.elemsize == pending.source.elemsize && entry.source.elempack == pending.source.elempack;
+            });
+            if (it != gpu_input_cache.end()) {
+                it->lastUse = ++gpu_input_cache_clock;
+                continue;
+            }
+
+            gpu_input_cache.push_back({ pending.source, pending.gpu, ++gpu_input_cache_clock });
+        }
+        while (gpu_input_cache.size() > gpu_input_cache_capacity) {
+            const auto oldest = std::min_element(gpu_input_cache.begin(), gpu_input_cache.end(), [](const GpuInputCacheEntry& lhs, const GpuInputCacheEntry& rhs) {
+                return lhs.lastUse < rhs.lastUse;
+            });
+            gpu_input_cache.erase(oldest);
+        }
+    }
+    if (collect_gpu_perf)
+    {
+        std::vector<uint64_t> timestamps(gpu_timestamp_count);
+        if (cmd.get_query_pool_results(0, gpu_timestamp_count, timestamps) == 0)
+        {
+            const auto timestamp_delta_ns = [&](const uint32_t begin, const uint32_t end) {
+                if (timestamps[end] < timestamps[begin])
+                    return int64_t{};
+                return static_cast<int64_t>(static_cast<double>(timestamps[end] - timestamps[begin]) * vkdev->info.timestamp_period());
+            };
+            perf->gpuUploadNs += timestamp_delta_ns(0, 1);
+            perf->gpuPreprocNs += timestamp_delta_ns(1, 2);
+            perf->gpuInferenceNs += timestamp_delta_ns(2, 3);
+            perf->gpuFlowResizeNs += timestamp_delta_ns(3, 4);
+            if (reduced_output)
+                perf->gpuFlowReduceNs += timestamp_delta_ns(4, 5);
+            if (vector_output)
+                perf->gpuFlowVectorNs += timestamp_delta_ns(4, 5);
+            perf->gpuReadbackNs += timestamp_delta_ns(5, 6);
+            perf->gpuTotalNs += timestamp_delta_ns(0, 6);
+        }
+    }
 
     if (!flow_staging.allocator || !flow_staging.data || !flow_staging.mapped_ptr())
         return finish(-1);

@@ -60,6 +60,17 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> flowExportResizeNs{ 0 };
     std::atomic<int64_t> flowCleanupNs{ 0 };
     std::atomic<int64_t> flowReadbackBytes{ 0 };
+    std::atomic<int64_t> gpuUploadNs{ 0 };
+    std::atomic<int64_t> gpuPreprocNs{ 0 };
+    std::atomic<int64_t> gpuInferenceNs{ 0 };
+    std::atomic<int64_t> gpuFlowResizeNs{ 0 };
+    std::atomic<int64_t> gpuFlowReduceNs{ 0 };
+    std::atomic<int64_t> gpuFlowVectorNs{ 0 };
+    std::atomic<int64_t> gpuReadbackNs{ 0 };
+    std::atomic<int64_t> gpuTotalNs{ 0 };
+    std::atomic<int64_t> gpuInputCacheHitCount{ 0 };
+    std::atomic<int64_t> gpuInputCacheMissCount{ 0 };
+    std::atomic<int64_t> gpuInputCacheWaitNs{ 0 };
     std::atomic<int64_t> packedCacheHitCount{ 0 };
     std::atomic<int64_t> packedCacheMissCount{ 0 };
     std::atomic<int64_t> packedBuildNs{ 0 };
@@ -67,6 +78,11 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> lumaBuildNs{ 0 };
     std::atomic<int64_t> vectorPackNs{ 0 };
     std::atomic<int64_t> renderSadMaskNs{ 0 };
+    std::atomic<int64_t> pairCarrierNs{ 0 };
+    std::atomic<int64_t> pairPropertyNs{ 0 };
+    std::atomic<int64_t> sadPackedBuildNs{ 0 };
+    std::atomic<int64_t> outputFrameAllocNs{ 0 };
+    std::atomic<int64_t> outputPropertyNs{ 0 };
 };
 
 struct MotionVectorLumaCacheEntry final {
@@ -414,6 +430,17 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto flowExportResizeNs = stats.flowExportResizeNs.load(std::memory_order_relaxed);
     const auto flowCleanupNs = stats.flowCleanupNs.load(std::memory_order_relaxed);
     const auto flowReadbackBytes = stats.flowReadbackBytes.load(std::memory_order_relaxed);
+    const auto gpuUploadNs = stats.gpuUploadNs.load(std::memory_order_relaxed);
+    const auto gpuPreprocNs = stats.gpuPreprocNs.load(std::memory_order_relaxed);
+    const auto gpuInferenceNs = stats.gpuInferenceNs.load(std::memory_order_relaxed);
+    const auto gpuFlowResizeNs = stats.gpuFlowResizeNs.load(std::memory_order_relaxed);
+    const auto gpuFlowReduceNs = stats.gpuFlowReduceNs.load(std::memory_order_relaxed);
+    const auto gpuFlowVectorNs = stats.gpuFlowVectorNs.load(std::memory_order_relaxed);
+    const auto gpuReadbackNs = stats.gpuReadbackNs.load(std::memory_order_relaxed);
+    const auto gpuTotalNs = stats.gpuTotalNs.load(std::memory_order_relaxed);
+    const auto gpuInputCacheHitCount = stats.gpuInputCacheHitCount.load(std::memory_order_relaxed);
+    const auto gpuInputCacheMissCount = stats.gpuInputCacheMissCount.load(std::memory_order_relaxed);
+    const auto gpuInputCacheWaitNs = stats.gpuInputCacheWaitNs.load(std::memory_order_relaxed);
     const auto packedCacheHitCount = stats.packedCacheHitCount.load(std::memory_order_relaxed);
     const auto packedCacheMissCount = stats.packedCacheMissCount.load(std::memory_order_relaxed);
     const auto packedBuildNs = stats.packedBuildNs.load(std::memory_order_relaxed);
@@ -421,9 +448,14 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto lumaBuildNs = stats.lumaBuildNs.load(std::memory_order_relaxed);
     const auto vectorPackNs = stats.vectorPackNs.load(std::memory_order_relaxed);
     const auto renderSadMaskNs = stats.renderSadMaskNs.load(std::memory_order_relaxed);
+    const auto pairCarrierNs = stats.pairCarrierNs.load(std::memory_order_relaxed);
+    const auto pairPropertyNs = stats.pairPropertyNs.load(std::memory_order_relaxed);
+    const auto sadPackedBuildNs = stats.sadPackedBuildNs.load(std::memory_order_relaxed);
+    const auto outputFrameAllocNs = stats.outputFrameAllocNs.load(std::memory_order_relaxed);
+    const auto outputPropertyNs = stats.outputPropertyNs.load(std::memory_order_relaxed);
     const auto rifeProcessAccountedNs = flowSetupNs + flowCpuPrepNs + flowCommandRecordNs + flowSubmitWaitNs +
                                         flowReadbackInvalidateNs + flowReadbackMapNs + flowUnpackNs +
-                                        flowExportDirectNs + flowExportResizeNs + flowCleanupNs;
+                                        flowExportDirectNs + flowExportResizeNs + flowCleanupNs + gpuInputCacheWaitNs;
     const auto rifeProcessUnaccountedNs = rifeProcessWallNs - rifeProcessAccountedNs;
 
     std::cerr << std::fixed << std::setprecision(3);
@@ -459,6 +491,25 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
               << " flow_readback_avg_mib=" << (flowCalls > 0 ? bytesToMiB(flowReadbackBytes) / flowCalls : 0.0)
               << " flow_readback_invalidate_ms=" << nsToMs(flowReadbackInvalidateNs)
               << " flow_readback_map_ms=" << nsToMs(flowReadbackMapNs) << '\n';
+    std::cerr << "  gpu_total_ms=" << nsToMs(gpuTotalNs)
+              << " gpu_upload_ms=" << nsToMs(gpuUploadNs)
+              << " gpu_preproc_ms=" << nsToMs(gpuPreprocNs)
+              << " gpu_inference_ms=" << nsToMs(gpuInferenceNs)
+              << " gpu_flow_resize_ms=" << nsToMs(gpuFlowResizeNs)
+              << " gpu_flow_reduce_ms=" << nsToMs(gpuFlowReduceNs)
+              << " gpu_flow_vector_ms=" << nsToMs(gpuFlowVectorNs)
+              << " gpu_readback_ms=" << nsToMs(gpuReadbackNs) << '\n';
+    std::cerr << "  gpu_total_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuTotalNs) / flowCalls : 0.0)
+              << " gpu_upload_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuUploadNs) / flowCalls : 0.0)
+              << " gpu_preproc_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuPreprocNs) / flowCalls : 0.0)
+              << " gpu_inference_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuInferenceNs) / flowCalls : 0.0)
+              << " gpu_flow_resize_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuFlowResizeNs) / flowCalls : 0.0)
+              << " gpu_flow_reduce_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuFlowReduceNs) / flowCalls : 0.0)
+              << " gpu_flow_vector_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuFlowVectorNs) / flowCalls : 0.0)
+              << " gpu_readback_avg_ms=" << (flowCalls > 0 ? nsToMs(gpuReadbackNs) / flowCalls : 0.0)
+              << " gpu_input_cache_hits=" << gpuInputCacheHitCount
+              << " gpu_input_cache_misses=" << gpuInputCacheMissCount
+              << " gpu_input_cache_wait_ms=" << nsToMs(gpuInputCacheWaitNs) << '\n';
     std::cerr << "  flow_setup_avg_ms=" << (flowCalls > 0 ? nsToMs(flowSetupNs) / flowCalls : 0.0)
               << " flow_cpu_prep_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCpuPrepNs) / flowCalls : 0.0)
               << " flow_record_avg_ms=" << (flowCalls > 0 ? nsToMs(flowCommandRecordNs) / flowCalls : 0.0)
@@ -481,7 +532,12 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
               << " packed_wait_ms=" << nsToMs(packedWaitNs)
               << " luma_build_ms=" << nsToMs(lumaBuildNs)
               << " vector_pack_ms=" << nsToMs(vectorPackNs)
-              << " render_sad_mask_ms=" << nsToMs(renderSadMaskNs) << std::endl;
+              << " render_sad_mask_ms=" << nsToMs(renderSadMaskNs)
+              << " pair_carrier_ms=" << nsToMs(pairCarrierNs)
+              << " pair_property_ms=" << nsToMs(pairPropertyNs)
+              << " sad_packed_build_ms=" << nsToMs(sadPackedBuildNs)
+              << " output_frame_alloc_ms=" << nsToMs(outputFrameAllocNs)
+              << " output_property_ms=" << nsToMs(outputPropertyNs) << std::endl;
     std::cerr << "  local_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(localSemaphoreWaitNs) / flowCalls : 0.0)
               << " shared_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(sharedSemaphoreWaitNs) / flowCalls : 0.0)
               << " render_sad_mask_avg_ms=" << (outputFrames > 0 ? nsToMs(renderSadMaskNs) / outputFrames : 0.0) << std::endl;
@@ -2316,6 +2372,28 @@ static void packMotionVectorBlob(const std::vector<MVToolsVector>& vectors, cons
         *stats = computeMotionVectorFrameStats(vectors, analysisData, includeSadStats, includeMotionStats);
 }
 
+template <typename VectorReader>
+static void packMotionVectorBlobDirect(const size_t vectorCount, const bool valid, const int64_t invalidSad,
+                                       std::vector<char>& blob, VectorReader&& readVector) {
+    const auto planeSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) + vectorCount * sizeof(MVToolsVector));
+    const auto groupSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2 + planeSize);
+    blob.resize(groupSize);
+    auto* output = blob.data();
+    const auto writeScalar = [&](const auto value) {
+        std::memcpy(output, &value, sizeof(value));
+        output += sizeof(value);
+    };
+
+    writeScalar(groupSize);
+    writeScalar(valid ? MVArraySizeType{ 1 } : MVArraySizeType{ 0 });
+    writeScalar(planeSize);
+    for (size_t i = 0; i < vectorCount; i++) {
+        const auto vector = valid ? readVector(i) : MVToolsVector{ 0, 0, invalidSad };
+        std::memcpy(output, &vector, sizeof(vector));
+        output += sizeof(vector);
+    }
+}
+
 static void buildMaskResizeAxisTable(const int srcSize, const int dstSize,
                                      std::vector<BilinearAxisEntry>& table) {
     table.resize(dstSize);
@@ -2738,6 +2816,20 @@ static void buildMotionVectorBlobsFromGpuVectors(const RIFEGpuMotionVector* gpuV
                                                  const bool includeSadStats = true,
                                                  const bool includeMotionStats = true) {
     const auto vectorCount = static_cast<size_t>(config.blkX) * config.blkY;
+    if (!includeSadStats && !includeMotionStats) {
+        const auto* backwardGpuVectors = gpuVectors;
+        const auto* forwardGpuVectors = gpuVectors + vectorCount;
+        const auto packDirection = [&](const RIFEGpuMotionVector* source, const bool backward, std::vector<char>& blob) {
+            packMotionVectorBlobDirect(vectorCount, valid, config.invalidSad, blob,
+                                       [source](const size_t i) {
+                                           return MVToolsVector{ source[i].x, source[i].y, static_cast<int64_t>(source[i].rawSad) };
+                                       });
+        };
+        packDirection(backwardGpuVectors, true, backwardBlob);
+        packDirection(forwardGpuVectors, false, forwardBlob);
+        return;
+    }
+
     backwardVectors.resize(vectorCount);
     forwardVectors.resize(vectorCount);
 
@@ -2779,6 +2871,25 @@ static void buildMotionVectorBlobsFromGpuPackedVectors(const RIFEGpuPackedMotion
                                                        const bool includeSadStats = true,
                                                        const bool includeMotionStats = true) {
     const auto vectorCount = static_cast<size_t>(config.blkX) * config.blkY;
+    const auto unpackVector = [](const RIFEGpuPackedMotionVector& vector) {
+        return MVToolsVector{
+            decodePackedMotionVectorComponent(vector.packedXY),
+            decodePackedMotionVectorComponent(vector.packedXY >> 16),
+            static_cast<int64_t>(vector.rawSad)
+        };
+    };
+    if (!includeSadStats && !includeMotionStats) {
+        const auto* backwardGpuVectors = gpuVectors;
+        const auto* forwardGpuVectors = gpuVectors + vectorCount;
+        const auto packDirection = [&](const RIFEGpuPackedMotionVector* source, const bool backward, std::vector<char>& blob) {
+            packMotionVectorBlobDirect(vectorCount, valid, config.invalidSad, blob,
+                                       [source, &unpackVector](const size_t i) { return unpackVector(source[i]); });
+        };
+        packDirection(backwardGpuVectors, true, backwardBlob);
+        packDirection(forwardGpuVectors, false, forwardBlob);
+        return;
+    }
+
     backwardVectors.resize(vectorCount);
     forwardVectors.resize(vectorCount);
 
@@ -2795,13 +2906,6 @@ static void buildMotionVectorBlobsFromGpuPackedVectors(const RIFEGpuPackedMotion
 
     const auto* backwardGpuVectors = gpuVectors;
     const auto* forwardGpuVectors = gpuVectors + vectorCount;
-    const auto unpackVector = [](const RIFEGpuPackedMotionVector& vector) {
-        return MVToolsVector{
-            decodePackedMotionVectorComponent(vector.packedXY),
-            decodePackedMotionVectorComponent(vector.packedXY >> 16),
-            static_cast<int64_t>(vector.rawSad)
-        };
-    };
     for (size_t i = 0; i < vectorCount; i++) {
         backwardVectors[i] = unpackVector(backwardGpuVectors[i]);
         forwardVectors[i] = unpackVector(forwardGpuVectors[i]);
@@ -2832,7 +2936,10 @@ static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisD
                                         const bool includeSadStats, const bool includeMotionStats,
                                         MotionVectorPerfStats* const perf,
                                         VSCore* core, const VSAPI* vsapi) {
+    const auto frameAllocStartNs = perf ? monotonicNowNs() : 0;
     auto dst = vsapi->newVideoFrame(&vi.format, vi.width, vi.height, nullptr, core);
+    if (perf)
+        accumulatePerfStat(perf->outputFrameAllocNs, monotonicNowNs() - frameAllocStartNs);
     if (renderSadMask) {
         const auto renderSadMaskStartNs = perf ? monotonicNowNs() : 0;
         renderMotionVectorSADMask(dst, vi, vectorBlob, vectorBlobSize, analysisData, absSadClipRange, vsapi);
@@ -2842,7 +2949,10 @@ static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisD
         zeroMotionVectorFrame(dst, vi, vsapi);
     }
     auto props = vsapi->getFramePropertiesRW(dst);
+    const auto propertyStartNs = perf ? monotonicNowNs() : 0;
     setMotionVectorProperties(props, analysisData, vectorBlob, vectorBlobSize, stats, includeSadStats, includeMotionStats, vsapi);
+    if (perf)
+        accumulatePerfStat(perf->outputPropertyNs, monotonicNowNs() - propertyStartNs);
     return dst;
 }
 
@@ -3224,20 +3334,26 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(n, d->node, frameCtx);
-        vsapi->requestFrameFilter(n, d->sourceNode, frameCtx);
+        if (!d->sourceMatchesInference)
+            vsapi->requestFrameFilter(n, d->sourceNode, frameCtx);
         if (n + delta < d->vi.numFrames) {
             vsapi->requestFrameFilter(n + delta, d->node, frameCtx);
-            vsapi->requestFrameFilter(n + delta, d->sourceNode, frameCtx);
+            if (!d->sourceMatchesInference)
+                vsapi->requestFrameFilter(n + delta, d->sourceNode, frameCtx);
         }
     } else if (activationReason == arAllFramesReady) {
         const auto pairStartNs = d->perfStats ? monotonicNowNs() : 0;
         auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
-        auto currentSource = vsapi->getFrameFilter(n, d->sourceNode, frameCtx);
+        const auto* currentSource = d->sourceMatchesInference ? vsapi->addFrameRef(current) : vsapi->getFrameFilter(n, d->sourceNode, frameCtx);
         const VSFrame* reference = n + delta < d->vi.numFrames ? vsapi->getFrameFilter(n + delta, d->node, frameCtx) : nullptr;
-        const VSFrame* referenceSource = n + delta < d->vi.numFrames ? vsapi->getFrameFilter(n + delta, d->sourceNode, frameCtx) : nullptr;
+        const VSFrame* referenceSource = n + delta < d->vi.numFrames ?
+            (d->sourceMatchesInference ? vsapi->addFrameRef(reference) : vsapi->getFrameFilter(n + delta, d->sourceNode, frameCtx)) : nullptr;
 
+        const auto pairCarrierStartNs = d->perfStats ? monotonicNowNs() : 0;
         auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
         zeroMotionVectorFrame(dst, d->vi, vsapi);
+        if (d->perfStats)
+            accumulatePerfStat(d->perf->pairCarrierNs, monotonicNowNs() - pairCarrierStartNs);
         auto props = vsapi->getFramePropertiesRW(dst);
         auto& scratch = getMotionVectorScratchBuffers();
 
@@ -3288,6 +3404,7 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                     currentSadPackedPtr = currentPacked.get();
                     referenceSadPackedPtr = referencePacked.get();
                 } else {
+                    const auto sadPackedBuildStartNs = d->perfStats ? monotonicNowNs() : 0;
                     const auto sourceWidth = vsapi->getFrameWidth(currentSource, 0);
                     const auto sourceHeight = vsapi->getFrameHeight(currentSource, 0);
                     currentSadPacked = getOrCreatePackedInferenceFrame(nullptr, currentSource, n, sourceWidth, sourceHeight,
@@ -3296,6 +3413,8 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                                                          d->perfStats ? d->perf.get() : nullptr, vsapi);
                     currentSadPackedPtr = currentSadPacked.get();
                     referenceSadPackedPtr = referenceSadPacked.get();
+                    if (d->perfStats)
+                        accumulatePerfStat(d->perf->sadPackedBuildNs, monotonicNowNs() - sadPackedBuildStartNs);
                 }
             }
 
@@ -3370,6 +3489,17 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                 accumulatePerfStat(d->perf->flowExportResizeNs, flowPerf.exportResizeNs);
                 accumulatePerfStat(d->perf->flowCleanupNs, flowPerf.cleanupNs);
                 accumulatePerfStat(d->perf->flowReadbackBytes, flowPerf.readbackBytes);
+                accumulatePerfStat(d->perf->gpuUploadNs, flowPerf.gpuUploadNs);
+                accumulatePerfStat(d->perf->gpuPreprocNs, flowPerf.gpuPreprocNs);
+                accumulatePerfStat(d->perf->gpuInferenceNs, flowPerf.gpuInferenceNs);
+                accumulatePerfStat(d->perf->gpuFlowResizeNs, flowPerf.gpuFlowResizeNs);
+                accumulatePerfStat(d->perf->gpuFlowReduceNs, flowPerf.gpuFlowReduceNs);
+                accumulatePerfStat(d->perf->gpuFlowVectorNs, flowPerf.gpuFlowVectorNs);
+                accumulatePerfStat(d->perf->gpuReadbackNs, flowPerf.gpuReadbackNs);
+                accumulatePerfStat(d->perf->gpuTotalNs, flowPerf.gpuTotalNs);
+                accumulatePerfStat(d->perf->gpuInputCacheHitCount, flowPerf.gpuInputCacheHits);
+                accumulatePerfStat(d->perf->gpuInputCacheMissCount, flowPerf.gpuInputCacheMisses);
+                accumulatePerfStat(d->perf->gpuInputCacheWaitNs, flowPerf.gpuInputCacheWaitNs);
             }
             if (status != 0) {
                 vsapi->freeFrame(current);
@@ -3434,12 +3564,15 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
                                             needStats ? &forwardStats : nullptr, d->sadStats, d->motionStats);
         }
 
+        const auto pairPropertyStartNs = d->perfStats ? monotonicNowNs() : 0;
         vsapi->mapSetData(props, RIFEMVBackwardVectorsInternalKey, backwardBlob.data(), static_cast<int>(backwardBlob.size()), dtBinary, maReplace);
         vsapi->mapSetData(props, RIFEMVForwardVectorsInternalKey, forwardBlob.data(), static_cast<int>(forwardBlob.size()), dtBinary, maReplace);
         if (needStats) {
             setMotionVectorInternalFrameStats(props, backwardStats, d->sadStats, d->motionStats, true, vsapi);
             setMotionVectorInternalFrameStats(props, forwardStats, d->sadStats, d->motionStats, false, vsapi);
         }
+        if (d->perfStats)
+            accumulatePerfStat(d->perf->pairPropertyNs, monotonicNowNs() - pairPropertyStartNs);
 
         vsapi->freeFrame(current);
         vsapi->freeFrame(reference);
@@ -3972,9 +4105,12 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     const auto mvConfig = pairData->mvConfig;
     const auto mvPerfStatsEnabled = pairData->perfStats;
     const auto mvPerf = pairData->perf;
+    pairData->vi.width = 1;
+    pairData->vi.height = 1;
     VSFilterDependency pairDeps[]{ { pairData->node, rpGeneral }, { pairData->sourceNode, rpGeneral } };
+    const auto pairDependencyCount = pairData->sourceMatchesInference ? 1 : 2;
     pairNode = vsapi->createVideoFilter2("RIFEMVPair", &pairData->vi, rifeMVPairGetFrame, rifeMVPairFree, fmParallel,
-                                         pairDeps, 2, pairData.get(), core);
+                                         pairDeps, pairDependencyCount, pairData.get(), core);
     if (!pairNode) {
         vsapi->mapSetError(out, "RIFEMV: failed to create internal pair filter");
         vsapi->freeNode(pairData->node);

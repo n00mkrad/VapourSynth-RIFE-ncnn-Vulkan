@@ -38,6 +38,8 @@ For a 1920x1024 clip using the default 16x8 blocks and 8x4 overlap, the approxim
 
 `gpu_full_packed` performs the same GPU calculations as `gpu_full`, but stores each directional vector as an 8-byte record instead of a 16-byte record. The packed record contains signed 16-bit X/Y components and the unchanged 32-bit raw SAD.
 
+Both GPU-full modes retain up to eight recent raw inputs per RIFE instance in GPU memory. This avoids re-uploading overlapping temporal-pair inputs while keeping the cache bounded.
+
 ## `"cpu"`
 
 `"cpu"` is the original dense export path and remains the default.
@@ -208,9 +210,13 @@ Useful counters:
 - `flow_export_direct_ms`: CPU time spent copying mapped readback data into the plugin output buffer.
 - `flow_reduce_record_ms`: command-recording time for the `gpu_flow_reduce` shader.
 - `flow_vector_record_ms`: command-recording time for the `gpu_full` and `gpu_full_packed` shader.
+- `gpu_upload_ms`, `gpu_preproc_ms`, `gpu_inference_ms`, `gpu_flow_resize_ms`, `gpu_flow_reduce_ms`, `gpu_flow_vector_ms`, and `gpu_readback_ms`: GPU execution time measured with Vulkan timestamps.
+- `gpu_total_ms`: GPU time from the first input upload through completion of the compact-output readback.
+- `gpu_input_cache_hits`, `gpu_input_cache_misses`, and `gpu_input_cache_wait_ms`: reuse counts and per-instance cache-admission wait for the bounded GPU-resident input cache used by `gpu_full` and `gpu_full_packed`.
 - `flow_submit_wait_ms`: time waiting for the GPU work and readback to complete.
 - `luma_build_ms`: CPU luma cache construction time. This should matter for `"cpu"` and `"gpu_flow_reduce"`, but not for `"gpu_full"` or `"gpu_full_packed"`.
 - `vector_pack_ms`: CPU-side vector finalization, stats, and blob packing time. In `"cpu"` this includes dense-flow reduction and SAD. In `"gpu_flow_reduce"` it still includes SAD. In `"gpu_full"` and `"gpu_full_packed"` it should be much smaller and mostly represent final conversion and packing.
+- `pair_carrier_ms`, `pair_property_ms`, `sad_packed_build_ms`, `output_frame_alloc_ms`, and `output_property_ms`: CPU-side carrier allocation, SAD-input packing, and frame-property copy costs.
 
 Interpret these counters together with end-to-end FPS. Some GPU modes move time from CPU counters into GPU wait time, so a single counter can look worse even when total throughput improves.
 

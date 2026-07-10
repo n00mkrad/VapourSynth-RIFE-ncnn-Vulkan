@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 
 // ncnn
 #include "net.h"
@@ -35,6 +37,17 @@ struct FlowPerfBreakdown final {
     int64_t exportResizeNs{};
     int64_t cleanupNs{};
     int64_t readbackBytes{};
+    int64_t gpuUploadNs{};
+    int64_t gpuPreprocNs{};
+    int64_t gpuInferenceNs{};
+    int64_t gpuFlowResizeNs{};
+    int64_t gpuFlowReduceNs{};
+    int64_t gpuFlowVectorNs{};
+    int64_t gpuReadbackNs{};
+    int64_t gpuTotalNs{};
+    int64_t gpuInputCacheHits{};
+    int64_t gpuInputCacheMisses{};
+    int64_t gpuInputCacheWaitNs{};
 };
 
 struct RIFEFlowReduceConfig final {
@@ -148,6 +161,12 @@ public:
                                           FlowPerfBreakdown* perf = nullptr) const;
 
 private:
+    struct GpuInputCacheEntry final {
+        ncnn::Mat source;
+        ncnn::VkMat gpu;
+        uint64_t lastUse{};
+    };
+
     int process_flow_internal(const float* src0R, const float* src0G, const float* src0B,
                               const float* src1R, const float* src1G, const float* src1B,
                               float* flow, RIFEReducedFlowBlock* reducedFlow, const RIFEFlowReduceConfig* reduceConfig,
@@ -182,6 +201,11 @@ private:
     bool enable_gpu_mv_full;
     int padding;
     std::string rife_v4_flow_blob_name;
+    std::unique_ptr<ncnn::VkBlobAllocator> gpu_input_cache_allocator;
+    mutable std::mutex gpu_input_cache_process_mutex;
+    mutable std::mutex gpu_input_cache_mutex;
+    mutable std::vector<GpuInputCacheEntry> gpu_input_cache;
+    mutable uint64_t gpu_input_cache_clock{};
 };
 
 #endif // RIFE_H
