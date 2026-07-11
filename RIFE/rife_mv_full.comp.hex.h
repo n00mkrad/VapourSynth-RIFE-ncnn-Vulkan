@@ -259,7 +259,14 @@ sad += round_positive(abs(current_luma - reference_luma) * p.max_sample);
 return sad;
 }
 
-uvec3 make_vector(float flow_x, float flow_y, int block_x, int block_y, bool swap_sad_images)
+struct MotionVector
+{
+uint x;
+uint y;
+uint sad;
+};
+
+MotionVector make_vector(float flow_x, float flow_y, int block_x, int block_y, bool swap_sad_images)
 {
 int x = round_away(-2.f * flow_x * p.motion_scale_x * float(p.pel));
 int y = round_away(-2.f * flow_y * p.motion_scale_y * float(p.pel));
@@ -268,23 +275,23 @@ y = clamp_mv_component(y, block_y, p.block_size_y, p.image_h, p.pad_y);
 int pixel_dx = round_away(float(x) / float(p.pel));
 int pixel_dy = round_away(float(y) / float(p.pel));
 uint sad = compute_sad(pixel_dx, pixel_dy, block_x, block_y, swap_sad_images);
-return uvec3(uint(x), uint(y), sad);
+return MotionVector(uint(x), uint(y), sad);
 }
 
-void store_vector(int vector_index, uvec3 vector)
+void store_vector(int vector_index, MotionVector motion)
 {
 int output_index = vector_index * p.output_words_per_vector;
 if (p.output_words_per_vector == 2)
 {
 // Pack only the final output; vector and SAD calculations remain 32-bit.
-vector_blob_data[output_index] = (vector.x & 0xffffu) | ((vector.y & 0xffffu) << 16);
-vector_blob_data[output_index + 1] = vector.z;
+vector_blob_data[output_index] = (motion.x & 0xffffu) | ((motion.y & 0xffffu) << 16);
+vector_blob_data[output_index + 1] = motion.sad;
 return;
 }
 
-vector_blob_data[output_index] = vector.x;
-vector_blob_data[output_index + 1] = vector.y;
-vector_blob_data[output_index + 2] = vector.z;
+vector_blob_data[output_index] = motion.x;
+vector_blob_data[output_index + 1] = motion.y;
+vector_blob_data[output_index + 2] = motion.sad;
 vector_blob_data[output_index + 3] = 0u;
 }
 
