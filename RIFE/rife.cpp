@@ -17,14 +17,13 @@
 #include "rife_v4_timestep.comp.hex.h"
 #include "rife_mv_reduce.comp.hex.h"
 #include "rife_mv_full.comp.hex.h"
-#include "rife_degrain.comp.hex.h"
 
 #include "rife_ops.h"
 
 DEFINE_LAYER_CREATOR(Warp)
 
 RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding,
-           FlowResizeMode _flow_resize_mode, bool _disable_vulkan_fp16, bool _enable_gpu_mv_full, bool _enable_degrain)
+           FlowResizeMode _flow_resize_mode, bool _disable_vulkan_fp16, bool _enable_gpu_mv_full)
 {
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
 
@@ -32,10 +31,6 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     rife_v4_timestep = 0;
     rife_mv_reduce = 0;
     rife_mv_full = 0;
-    rife_degrain_sad = 0;
-    rife_degrain_accumulate = 0;
-    rife_degrain_finish = 0;
-    rife_degrain_stats = 0;
     rife_flow_scale_image = 0;
     rife_flow_resize_flow = 0;
     rife_flow_scale_vectors = 0;
@@ -51,7 +46,6 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     rife_v4 = _rife_v4;
     disable_vulkan_fp16 = _disable_vulkan_fp16;
     enable_gpu_mv_full = _enable_gpu_mv_full;
-    enable_degrain = _enable_degrain;
     padding = _padding;
     rife_v4_flow_blob_name.clear();
     if (vkdev && enable_gpu_mv_full)
@@ -70,10 +64,6 @@ RIFE::~RIFE()
     delete rife_v4_timestep;
     delete rife_mv_reduce;
     delete rife_mv_full;
-    delete rife_degrain_sad;
-    delete rife_degrain_accumulate;
-    delete rife_degrain_finish;
-    delete rife_degrain_stats;
 
     if (use_flow_scale)
     {
@@ -367,25 +357,6 @@ int RIFE::load(const std::string& modeldir)
             rife_mv_full->set_optimal_local_size_xyz(64, 1, 1);
             std::vector<ncnn::vk_specialization_type> fullSpecializations;
             rife_mv_full->create(spirv.data(), spirv.size() * 4, fullSpecializations);
-        }
-
-        if (enable_degrain) {
-            const auto createDegrainPipeline = [&](const char* source, const int sourceSize, ncnn::Pipeline*& pipeline, const int localX, const int localY) {
-                std::vector<uint32_t> spirv;
-                static ncnn::Mutex lock;
-                {
-                    ncnn::MutexLockGuard guard(lock);
-                    compile_spirv_module(source, sourceSize, opt, spirv);
-                }
-                pipeline = new ncnn::Pipeline(vkdev);
-                pipeline->set_optimal_local_size_xyz(localX, localY, 1);
-                std::vector<ncnn::vk_specialization_type> degrainSpecializations;
-                pipeline->create(spirv.data(), spirv.size() * 4, degrainSpecializations);
-            };
-            createDegrainPipeline(rife_degrain_sad_comp_data, static_cast<int>(sizeof(rife_degrain_sad_comp_data) - 1), rife_degrain_sad, 8, 8);
-            createDegrainPipeline(rife_degrain_accumulate_comp_data, static_cast<int>(sizeof(rife_degrain_accumulate_comp_data) - 1), rife_degrain_accumulate, 8, 8);
-            createDegrainPipeline(rife_degrain_finish_comp_data, static_cast<int>(sizeof(rife_degrain_finish_comp_data) - 1), rife_degrain_finish, 8, 8);
-            createDegrainPipeline(rife_degrain_stats_comp_data, static_cast<int>(sizeof(rife_degrain_stats_comp_data) - 1), rife_degrain_stats, 1, 1);
         }
 
     }
@@ -1448,315 +1419,6 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     return process_flow_internal(src0R, src0G, src0B, src1R, src1G, src1B,
                                  flow_out, nullptr, nullptr, nullptr, nullptr, nullptr,
                                  w, h, stride, nullptr, nullptr, perf);
-}
-
-int RIFE::process_degrain(const ncnn::Mat& current_inference, const std::array<const ncnn::Mat*, 3>& current_planes,
-                          const std::vector<RIFEDegrainReference>& references, const RIFEDegrainConfig& config,
-                          const std::array<ncnn::Mat*, 3>& output_planes, std::vector<RIFEDegrainStats>* stats,
-                          FlowPerfBreakdown* perf) const
-{
-    // Record all reference flow and denoise work before one final output submission and readback.
-    const bool collect_perf = perf != nullptr;
-    if (collect_perf)
-        *perf = {};
-    if (!vkdev || !rife_degrain_sad || !rife_degrain_accumulate || !rife_degrain_finish || references.empty())
-        return -1;
-    const auto valid_inference = [](const ncnn::Mat& input) {
-        return !input.empty() && input.dims == 3 && input.c == 3 && input.elempack == 1 && input.elemsize == sizeof(float);
-    };
-    if (!valid_inference(current_inference) || config.lumaWidth <= 0 || config.lumaHeight <= 0)
-        return -1;
-    for (int plane = 0; plane < 3; plane++) {
-        if (!current_planes[plane] || !output_planes[plane] || current_planes[plane]->empty())
-            return -1;
-    }
-    for (const auto& reference : references) {
-        if (!reference.inference || !valid_inference(*reference.inference))
-            return -1;
-        for (int plane = 0; plane < 3; plane++)
-            if (!reference.planes[plane] || reference.planes[plane]->empty())
-                return -1;
-    }
-
-    const auto setup_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
-    ncnn::VkAllocator* staging_vkallocator = vkdev->acquire_staging_allocator();
-    const auto finish = [&](const int status) {
-        const auto cleanup_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        vkdev->reclaim_blob_allocator(blob_vkallocator);
-        vkdev->reclaim_staging_allocator(staging_vkallocator);
-        if (collect_perf)
-            perf->cleanupNs += monotonic_now_ns() - cleanup_start_ns;
-        return status;
-    };
-    ncnn::Option opt = flownet.opt;
-    opt.blob_vkallocator = blob_vkallocator;
-    opt.workspace_vkallocator = blob_vkallocator;
-    opt.staging_vkallocator = staging_vkallocator;
-    if (collect_perf)
-        perf->setupNs += monotonic_now_ns() - setup_start_ns;
-
-    ncnn::VkCompute cmd(vkdev);
-    const auto command_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    const int inference_w = current_inference.w;
-    const int inference_h = current_inference.h;
-    const int padded_w = (inference_w + padding - 1) / padding * padding;
-    const int padded_h = (inference_h + padding - 1) / padding * padding;
-    const auto tile_elemsize = opt.use_fp16_storage ? 2u : 4u;
-
-    const auto upload = [&](const ncnn::Mat& input, ncnn::VkMat& output) {
-        cmd.record_clone(input, output, opt);
-        return !output.empty();
-    };
-    const auto preprocess = [&](const ncnn::VkMat& input, ncnn::VkMat& output) {
-        output.create(padded_w, padded_h, 3, tile_elemsize, 1, blob_vkallocator);
-        if (output.empty())
-            return false;
-        std::vector<ncnn::VkMat> bindings{ input, output };
-        std::vector<ncnn::vk_constant_type> constants(6);
-        constants[0].i = input.w;
-        constants[1].i = input.h;
-        constants[2].i = static_cast<int>(input.cstep);
-        constants[3].i = output.w;
-        constants[4].i = output.h;
-        constants[5].i = static_cast<int>(output.cstep);
-        cmd.record_pipeline(rife_preproc, bindings, constants, output);
-        return true;
-    };
-    const auto infer_flow = [&](const ncnn::VkMat& current, const ncnn::VkMat& reference, ncnn::VkMat& flow) {
-        ncnn::Extractor ex = flownet.create_extractor();
-        ex.set_blob_vkallocator(blob_vkallocator);
-        ex.set_workspace_vkallocator(blob_vkallocator);
-        ex.set_staging_vkallocator(staging_vkallocator);
-        if (rife_v4) {
-            ncnn::VkMat timestep;
-            timestep.create(padded_w, padded_h, 1, tile_elemsize, 1, blob_vkallocator);
-            if (timestep.empty())
-                return false;
-            std::vector<ncnn::VkMat> bindings{ timestep };
-            std::vector<ncnn::vk_constant_type> constants(4);
-            constants[0].i = timestep.w;
-            constants[1].i = timestep.h;
-            constants[2].i = static_cast<int>(timestep.cstep);
-            constants[3].f = 0.5f;
-            cmd.record_pipeline(rife_v4_timestep, bindings, constants, timestep);
-            ex.input("in0", current);
-            ex.input("in1", reference);
-            ex.input("in2", timestep);
-            return extract_v4_flow_blob(ex, cmd, flow, rife_v4_flow_blob_name);
-        }
-        if (use_flow_scale) {
-            ncnn::VkMat current_scaled;
-            ncnn::VkMat reference_scaled;
-            if (rife_flow_scale_image->forward(current, current_scaled, cmd, opt) != 0 ||
-                rife_flow_scale_image->forward(reference, reference_scaled, cmd, opt) != 0)
-                return false;
-            ex.input("input0", current_scaled);
-            ex.input("input1", reference_scaled);
-            ncnn::VkMat flow_scaled;
-            if (ex.extract("flow", flow_scaled, cmd) != 0)
-                return false;
-            ncnn::VkMat flow_half;
-            return rife_flow_resize_flow->forward(flow_scaled, flow_half, cmd, opt) == 0 &&
-                   rife_flow_scale_vectors->forward(flow_half, flow, cmd, opt) == 0;
-        }
-        ex.input("input0", current);
-        ex.input("input1", reference);
-        return ex.extract("flow", flow, cmd) == 0;
-    };
-
-    ncnn::VkMat current_inference_gpu;
-    ncnn::VkMat current_inference_padded;
-    if (!upload(current_inference, current_inference_gpu) || !preprocess(current_inference_gpu, current_inference_padded))
-        return finish(-1);
-    std::array<ncnn::VkMat, 3> current_gpu;
-    std::array<ncnn::VkMat, 3> numerator_gpu;
-    std::array<ncnn::VkMat, 3> denominator_gpu;
-    std::array<ncnn::Mat, 3> denominator_cpu;
-    for (int plane = 0; plane < 3; plane++) {
-        if (!upload(*current_planes[plane], current_gpu[plane]))
-            return finish(-1);
-        numerator_gpu[plane].create(current_planes[plane]->w, current_planes[plane]->h, sizeof(float), 1, blob_vkallocator);
-        denominator_gpu[plane].create(current_planes[plane]->w, current_planes[plane]->h, sizeof(float), 1, blob_vkallocator);
-        if (numerator_gpu[plane].empty() || denominator_gpu[plane].empty())
-            return finish(-1);
-        cmd.record_clone(current_gpu[plane], numerator_gpu[plane], opt);
-        denominator_cpu[plane].create(current_planes[plane]->w, current_planes[plane]->h, sizeof(float), 1);
-        denominator_cpu[plane].fill(1.f);
-        cmd.record_clone(denominator_cpu[plane], denominator_gpu[plane], opt);
-    }
-
-    std::vector<ncnn::VkMat> stats_staging;
-    stats_staging.reserve(references.size());
-    for (const auto& reference : references) {
-        // Each reference is consumed into persistent numerators and denominators before the next reference.
-        const auto inference_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        ncnn::VkMat reference_inference_gpu;
-        ncnn::VkMat reference_inference_padded;
-        ncnn::VkMat flow;
-        if (!upload(*reference.inference, reference_inference_gpu) || !preprocess(reference_inference_gpu, reference_inference_padded) ||
-            !infer_flow(current_inference_padded, reference_inference_padded, flow))
-            return finish(-1);
-        if (collect_perf)
-            perf->inferenceRecordNs += monotonic_now_ns() - inference_start_ns;
-        ncnn::VkMat full_flow = flow;
-        if (flow.w < inference_w || flow.h < inference_h) {
-            ncnn::VkMat resized_flow;
-            ncnn::VkMat scaled_flow;
-            if (!rife_flow_resize_output || !rife_flow_double_vectors ||
-                rife_flow_resize_output->forward(flow, resized_flow, cmd, opt) != 0 ||
-                rife_flow_double_vectors->forward(resized_flow, scaled_flow, cmd, opt) != 0)
-                return finish(-1);
-            full_flow = scaled_flow;
-        }
-        if (full_flow.w < inference_w || full_flow.h < inference_h || full_flow.elempack != 4)
-            return finish(-1);
-
-        std::array<ncnn::VkMat, 3> reference_gpu;
-        for (int plane = 0; plane < 3; plane++)
-            if (!upload(*reference.planes[plane], reference_gpu[plane]))
-                return finish(-1);
-        ncnn::VkMat sad_gpu;
-        sad_gpu.create(config.lumaWidth, config.lumaHeight, sizeof(float), 1, blob_vkallocator);
-        if (sad_gpu.empty())
-            return finish(-1);
-        {
-            const auto sad_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
-            std::vector<ncnn::VkMat> bindings{ full_flow, current_gpu[0], reference_gpu[0], sad_gpu };
-            std::vector<ncnn::vk_constant_type> constants(9);
-            constants[0].i = full_flow.w;
-            constants[1].i = inference_w;
-            constants[2].i = inference_h;
-            constants[3].i = config.lumaWidth;
-            constants[4].i = config.lumaHeight;
-            constants[5].f = config.motionScaleX;
-            constants[6].f = config.motionScaleY;
-            constants[7].i = config.sadCenter ? 1 : 0;
-            constants[8].f = config.sadCenterFloor;
-            cmd.record_pipeline(rife_degrain_sad, bindings, constants, sad_gpu);
-            if (collect_perf) {
-                const auto elapsed = monotonic_now_ns() - sad_record_start_ns;
-                perf->degrainSadRecordNs += elapsed;
-                if (config.sadCenter)
-                    perf->degrainCenteredRecordNs += elapsed;
-            }
-        }
-        const auto accumulate_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
-        for (int plane = 0; plane < 3; plane++) {
-            const int sub_x = plane == 0 ? 0 : config.subSamplingW;
-            const int sub_y = plane == 0 ? 0 : config.subSamplingH;
-            std::vector<ncnn::VkMat> bindings{ full_flow, reference_gpu[plane], sad_gpu, numerator_gpu[plane], denominator_gpu[plane] };
-            std::vector<ncnn::vk_constant_type> constants(13);
-            constants[0].i = full_flow.w;
-            constants[1].i = inference_w;
-            constants[2].i = inference_h;
-            constants[3].i = config.lumaWidth;
-            constants[4].i = config.lumaHeight;
-            constants[5].i = current_planes[plane]->w;
-            constants[6].i = current_planes[plane]->h;
-            constants[7].i = sub_x;
-            constants[8].i = sub_y;
-            constants[9].f = config.motionScaleX;
-            constants[10].f = config.motionScaleY;
-            constants[11].f = plane == 0 ? config.thSad : config.thSadC;
-            constants[12].f = config.flowConsistency;
-            cmd.record_pipeline(rife_degrain_accumulate, bindings, constants, numerator_gpu[plane]);
-        }
-        if (collect_perf)
-            perf->degrainAccumulateRecordNs += monotonic_now_ns() - accumulate_record_start_ns;
-        if (config.sadStats) {
-            const auto stats_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
-            const auto pixel_count = config.lumaWidth * config.lumaHeight;
-            const auto partial_count = (pixel_count + 255) / 256;
-            ncnn::VkMat partial_stats_gpu;
-            partial_stats_gpu.create(partial_count, sizeof(float) * 2, 2, blob_vkallocator);
-            ncnn::VkMat stats_gpu;
-            stats_gpu.create(1, sizeof(float) * 2, 2, blob_vkallocator);
-            if (partial_stats_gpu.empty() || stats_gpu.empty())
-                return finish(-1);
-            {
-                std::vector<ncnn::VkMat> bindings{ sad_gpu, partial_stats_gpu };
-                std::vector<ncnn::vk_constant_type> constants(2);
-                constants[0].i = pixel_count;
-                constants[1].i = 0;
-                ncnn::Mat dispatcher(partial_count, static_cast<void*>(nullptr));
-                cmd.record_pipeline(rife_degrain_stats, bindings, constants, dispatcher);
-            }
-            {
-                std::vector<ncnn::VkMat> bindings{ partial_stats_gpu, stats_gpu };
-                std::vector<ncnn::vk_constant_type> constants(2);
-                constants[0].i = partial_count;
-                constants[1].i = 1;
-                ncnn::Mat dispatcher(1, static_cast<void*>(nullptr));
-                cmd.record_pipeline(rife_degrain_stats, bindings, constants, dispatcher);
-            }
-            ncnn::Option staging_opt = opt;
-            staging_opt.blob_vkallocator = staging_vkallocator;
-            ncnn::VkMat staging;
-            cmd.record_clone(stats_gpu, staging, staging_opt);
-            stats_staging.push_back(staging);
-            if (collect_perf)
-                perf->degrainStatsRecordNs += monotonic_now_ns() - stats_record_start_ns;
-            if (collect_perf)
-                perf->readbackBytes += static_cast<int64_t>(staging.total() * staging.elemsize);
-        }
-    }
-
-    std::array<ncnn::VkMat, 3> output_staging;
-    ncnn::Option staging_opt = opt;
-    staging_opt.blob_vkallocator = staging_vkallocator;
-    const auto output_record_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    for (int plane = 0; plane < 3; plane++) {
-        ncnn::VkMat output_gpu;
-        output_gpu.create(current_planes[plane]->w, current_planes[plane]->h, sizeof(float), 1, blob_vkallocator);
-        if (output_gpu.empty())
-            return finish(-1);
-        std::vector<ncnn::VkMat> bindings{ current_gpu[plane], numerator_gpu[plane], denominator_gpu[plane], output_gpu };
-        std::vector<ncnn::vk_constant_type> constants(3);
-        constants[0].i = current_planes[plane]->w;
-        constants[1].i = current_planes[plane]->h;
-        constants[2].f = (plane == 0 ? config.limit : config.limitC) / 255.f;
-        cmd.record_pipeline(rife_degrain_finish, bindings, constants, output_gpu);
-        cmd.record_clone(output_gpu, output_staging[plane], staging_opt);
-        if (output_staging[plane].empty())
-            return finish(-1);
-        if (collect_perf)
-            perf->readbackBytes += static_cast<int64_t>(output_staging[plane].total() * output_staging[plane].elemsize);
-    }
-    if (collect_perf)
-        perf->degrainOutputRecordNs += monotonic_now_ns() - output_record_start_ns;
-    if (collect_perf)
-        perf->commandRecordNs += monotonic_now_ns() - command_start_ns;
-    const auto wait_start_ns = collect_perf ? monotonic_now_ns() : 0;
-    if (cmd.submit_and_wait() != 0)
-        return finish(-1);
-    if (collect_perf)
-        perf->submitWaitNs += monotonic_now_ns() - wait_start_ns;
-
-    for (int plane = 0; plane < 3; plane++) {
-        if (!output_staging[plane].allocator || !output_staging[plane].data || !output_staging[plane].mapped_ptr() ||
-            output_staging[plane].allocator->invalidate(output_staging[plane].data) != 0)
-            return finish(-1);
-        const ncnn::Mat mapped = output_staging[plane].mapped();
-        if (mapped.empty())
-            return finish(-1);
-        output_planes[plane]->create(mapped.w, mapped.h, sizeof(float), 1);
-        std::memcpy(output_planes[plane]->data, mapped.data, mapped.total() * mapped.elemsize);
-    }
-    if (config.sadStats && stats) {
-        stats->clear();
-        stats->reserve(stats_staging.size());
-        for (auto& staging : stats_staging) {
-            if (!staging.allocator || !staging.data || !staging.mapped_ptr() || staging.allocator->invalidate(staging.data) != 0)
-                return finish(-1);
-            const ncnn::Mat mapped = staging.mapped();
-            if (mapped.empty())
-                return finish(-1);
-            const auto* values = static_cast<const float*>(mapped.data);
-            stats->push_back({ values[0] / static_cast<float>(config.lumaWidth * config.lumaHeight), values[1] });
-        }
-    }
-    return finish(0);
 }
 
 int RIFE::process_flow(const ncnn::Mat& src0_packed, const ncnn::Mat& src1_packed,
