@@ -140,7 +140,7 @@ The first cache prototype used `VkWeightAllocator`, whose allocation behavior is
 
 The internal pair node already owns the backward result. The output graph was changed so that the pair node itself is the public backward clip, while the forward result continues through the extraction node using the private forward-vector property.
 
-This removed one filter layer and one property-copy/materialization pass for every backward output frame. The earlier intermediate step of reducing the hidden pair carrier to 1x1 was superseded by this direct-output arrangement; the public pair/backward frame must be full-sized because it is now observable and can carry the rendered backward SAD mask.
+This removed one filter layer and one property-copy/materialization pass for every backward output frame. The earlier intermediate step of reducing the hidden pair carrier to 1x1 was superseded by this direct-output arrangement; the public pair/backward frame must be full-sized because it is now observable.
 
 A nearby full run measured **45.20 FPS** after this graph change versus roughly **45.5 FPS** in adjacent runs. That is effectively neutral at the whole-pipeline level and should not be reported as an FPS win. The change was retained because it removes unneeded CPU and property work, which is visible in profiling and can matter more in less inference-bound workloads.
 
@@ -218,7 +218,7 @@ Those additions were interpreted together with the report's pre-existing timing 
 - GPU input-cache hits, misses, wait/admission time, and the cache contribution to total processing time.
 - CPU packed-frame cache hits, misses, build time, and contention wait.
 - Luma/SAD source build time.
-- Vector packing and SAD-mask rendering.
+- Vector packing.
 - Pair-carrier and pair-property work.
 - Packed SAD-source construction.
 - Public output-frame allocation and property materialization.
@@ -337,10 +337,6 @@ It was tested and showed no measurable gain. Revisit only with a new backend/dev
 
 Values 1 through 3 were effectively tied. The aggregate instance-rate analysis shows that radius 3 is already scaling proportionally from radius 2.
 
-### Do not optimize SAD-mask rendering for the supplied benchmark
-
-The benchmark configuration disables or bypasses work that is not requested by the consuming script. If `render_sad_mask=False`, optimizing the rasterizer cannot improve its FPS. Profile a mask-enabled workload separately before spending effort there.
-
 ### Do not restore Vulkan pack8 in the current NCNN integration
 
 Upstream NCNN removed the Vulkan pack8 path. The adapted custom Warp implementation supports the current pack1/pack4 model. Restoring stale pack8 code is an API/compatibility regression, not a supported optimization.
@@ -381,7 +377,7 @@ Fusing flow resize with reduction/vector generation could avoid an intermediate 
 
 ### Reduce remaining VapourSynth property/materialization overhead
 
-The new counters make this measurable. Any further graph or property work should target a demonstrated total, preserve `MVTools_MVAnalysisData` and `MVTools_vectors` byte compatibility, and be tested with optional statistics and SAD-mask rendering both enabled and disabled. These CPU changes are most likely to matter on faster GPUs or lower-resolution inference, where inference occupies a smaller share of wall time.
+The new counters make this measurable. Any further graph or property work should target a demonstrated total, preserve `MVTools_MVAnalysisData` and `MVTools_vectors` byte compatibility, and be tested with optional statistics enabled and disabled. These CPU changes are most likely to matter on faster GPUs or lower-resolution inference, where inference occupies a smaller share of wall time.
 
 ## Validation performed
 

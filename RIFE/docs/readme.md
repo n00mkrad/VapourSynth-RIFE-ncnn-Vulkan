@@ -26,10 +26,8 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - Motion-vector APIs accept either constant-format `RGBS` or constant-format `YUV`. Non-`RGBS` `YUV` input is converted internally to `RGBS` for RIFE inference.
 - MVTools metadata is derived from the main `clip`. For non-`RGBS` input, the original input clip is used as the metadata source automatically.
 - The main `clip` is always used for RIFE motion estimation. The optional `sad_clip` is only used as the source-sized reference signal for synthetic SAD calculation and must match `clip` width, height, and frame count.
-- Vector clips are `Gray8` carrier clips. The motion data still lives in frame properties. By default the pixel plane contains a SAD mask derived from the exported block SADs for that direction, and `render_sad_mask=False` leaves that plane black instead.
-- By default the rendered SAD carrier mask is relative: it maps `0` to `0`, maps the largest SAD in that frame to `255`, and bilinearly upsamples the block grid to full-frame `Gray8`.
-- If `abs_sad_clip_range > 0`, the rendered carrier mask switches to absolute mode: it quantizes the SAD range starting at `0`, clips values at the requested upper bound, and bilinearly upsamples the block grid to full-frame `Gray8`.
-- Frames without a valid reference still export invalid MVTools vectors as before. When the SAD mask is rendered, relative mode makes it solid `255` and absolute mode shows the clipped sentinel SAD, which will usually also be `255`.
+- Vector clips are `Gray8` carrier clips with black pixel planes. Motion vectors and SAD data live in frame properties.
+- Frames without a valid reference still export invalid MVTools vectors as before.
 - Exported motion-vector frames can optionally include SAD summary frame properties `RMV_AvgSad`, `RMV_MaxSad`, and `RMV_MinSad` (controlled by `sad_stats`), and motion-summary frame properties `RMV_AvgAbsDx`, `RMV_AvgAbsDy`, `RMV_AvgAbsMotion`, and `RMV_PanAmount` (controlled by `motion_stats`). `RMV_PanAmount` is the source-pixel magnitude of the median signed frame motion vector, which is intended to track coherent panning/camera translation better than local object motion.
 - Do not resize or colorspace-convert the exported vector clips after creation. Use `rmv.CropGrid(...)` when a vector clip and matching `mv.Super` clip need a metadata-aware crop.
 
@@ -128,19 +126,6 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
   If either value is provided, missing values default to `1.0`, `chroma=1` is required, and SAD is computed as weighted Y plus weighted Cb/Cr instead of RGB-channel SAD.
   Use `sad_uv=0` for weighted luma-only scoring through the GPU-full path.
 
-- `abs_sad_clip_range`
-  Controls how SAD values are written into the `Gray8` carrier pixels.
-  Default: `0`.
-  `0` keeps the relative per-frame normalization mode.
-  Values greater than `0` enable absolute mode, where the carrier starts at SAD `0`, clips at the requested upper bound, and uses the available `Gray8` precision to quantize that range.
-  Examples: `1024` gives steps of `4`, `2048` gives steps of `8`, `4096` gives steps of `16`.
-
-- `render_sad_mask`
-  Controls whether the `Gray8` carrier plane is populated with the direction-specific SAD mask.
-  Default: `True`.
-  If disabled, the carrier plane is left black while motion vectors and metadata remain unchanged.
-  This can reduce CPU overhead when downstream consumers only need the frame properties.
-
 - `sad_stats`
   Controls whether SAD summary frame properties are computed and attached.
   Default: `False`.
@@ -216,7 +201,7 @@ sup_crop = core.rmv.CropGrid(sup, left=1, right=1, vectors=mvfw)
 ### Signature
 
 ```python
-mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., sad_clip=None, gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_y=None, sad_uv=None, abs_sad_clip_range=0, render_sad_mask=True, sad_stats=False, motion_stats=False, matrix_in_s=None, range_in_s=None, hpad=0, vpad=0, block_reduce=1, chroma=0)
+mvbw, mvfw = core.rmv.RIFEMV(clip, model_path=..., sad_clip=None, gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, shared_luma_cache=True, shared_packed_cache=True, packed_cache_mib=256, flow_scale=1.0, res_scale=1.0, cpu_flow_resize=None, gpu_mode=0, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_y=None, sad_uv=None, sad_stats=False, motion_stats=False, matrix_in_s=None, range_in_s=None, hpad=0, vpad=0, block_reduce=1, chroma=0)
 ```
 
 ### Return value
@@ -249,7 +234,6 @@ mvbw, mvfw = core.rmv.RIFEMV(...)
 - `gpu_input_cache_hits`, `gpu_input_cache_misses`, and `gpu_input_cache_wait_ms` reuse counts and per-instance cache-admission wait for the bounded GPU-resident input cache used by `gpu_full` and `gpu_full_packed`
 - `packed_cache_hits` and `packed_cache_misses` packed inference-frame cache reuse counters
 - `packed_build_ms` and `packed_wait_ms` packed-frame build and cache-contention wait time
-- `render_sad_mask_ms` time spent rasterizing the `Gray8` SAD carrier plane when `render_sad_mask=True`
 - `pair_carrier_ms`, `pair_property_ms`, `sad_packed_build_ms`, `output_frame_alloc_ms`, and `output_property_ms` CPU time spent materializing internal/public carrier frames and their properties
 
 ### Recommended usage

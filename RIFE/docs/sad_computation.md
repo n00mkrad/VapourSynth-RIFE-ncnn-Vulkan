@@ -168,68 +168,6 @@ That means:
 
 Because MVTools performs its own block-size normalization internally, changing the actual exported `VECTOR.sad` values to an 8x8-equivalent scale would break downstream threshold behavior.
 
-## Gray8 carrier SAD mask
-
-The public vector clips returned by `RIFEMV` are `Gray8` carrier clips. Their MVTools compatibility still comes entirely from frame properties, but the exposed pixel plane is now populated with a direction-specific SAD mask instead of dummy zeroes.
-
-The mask is generated from the selected direction's exported finest-plane block `sad` values already stored in `MVTools_vectors`. The pixel plane does not use `RMV_AvgSad`, `RMV_AvgSadNorm`, or any other summary property.
-
-### Relative mode
-
-If `abs_sad_clip_range = 0`, the mask uses the relative per-frame mode.
-
-Let `sad[i]` be the raw exported `VECTOR.sad` for block `i` in that frame, and let:
-
-```text
-frameMaxSad = max(sad[i])
-```
-
-If `frameMaxSad <= 0`, the whole `Gray8` plane is filled with `0`.
-
-Otherwise each block-grid sample is normalized as:
-
-```text
-maskSmall[i] = round(sad[i] * 255 / frameMaxSad)
-```
-
-with the result clamped to `[0, 255]`.
-
-This means:
-
-- absolute zero SAD stays black
-- the largest SAD present in that frame becomes white
-- the contrast is frame-local rather than globally calibrated
-
-### Absolute mode
-
-If `abs_sad_clip_range > 0`, the mask switches to an absolute clipped range that still starts at SAD `0`.
-
-Let:
-
-```text
-clipRange = abs_sad_clip_range
-clippedSad[i] = min(max(sad[i], 0), clipRange)
-maskSmall[i] = min(floor(clippedSad[i] * 256 / clipRange), 255)
-```
-
-This means:
-
-- SAD values are quantized against a fixed range instead of the current frame maximum
-- values at or above `clipRange` map to white
-- when `clipRange` is a multiple of `256`, each code step corresponds to `clipRange / 256` SAD units
-
-Examples:
-
-- `abs_sad_clip_range = 1024` gives steps of `4`
-- `abs_sad_clip_range = 2048` gives steps of `8`
-- `abs_sad_clip_range = 4096` gives steps of `16`
-
-### Full-frame rasterization
-
-One normalized value is produced for each exported block, so the intermediate mask is a `nBlkX x nBlkY` grid. That small grid is then bilinearly upscaled directly to the full output frame size.
-
-This rasterization is intentionally smooth and visualization-oriented. It is meant to make the `Gray8` carrier clip directly useful as a SAD mask, not to reproduce MVTools `mv.Mask(kind=1)` byte-for-byte.
-
 ## Invalid vectors
 
 If no valid reference frame exists, the vector is marked invalid and uses:
@@ -241,5 +179,3 @@ sad = round(blockSize * blockSize * (1 << bits) * sadMultiplier)
 ```
 
 This sentinel is stored directly without running the per-pixel SAD loop.
-
-Because every block in an invalid frame receives the same nonzero sentinel SAD, relative mode produces a solid `255` `Gray8` carrier mask for that direction. In absolute mode the mask shows that same sentinel after clipping to `abs_sad_clip_range`, which will usually also produce `255`.

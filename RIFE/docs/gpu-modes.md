@@ -182,7 +182,6 @@ mvbw, mvfw = core.rmv.RIFEMV(
     blksize_y=8,
     overlap_x=8,
     overlap_y=4,
-    render_sad_mask=False,
     perf_stats=True,
 )
 ```
