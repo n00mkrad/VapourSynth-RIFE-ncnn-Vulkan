@@ -89,6 +89,11 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> sadPackedBuildNs{ 0 };
     std::atomic<int64_t> outputFrameAllocNs{ 0 };
     std::atomic<int64_t> outputPropertyNs{ 0 };
+    std::atomic<int64_t> degrainSadRecordNs{ 0 };
+    std::atomic<int64_t> degrainCenteredRecordNs{ 0 };
+    std::atomic<int64_t> degrainAccumulateRecordNs{ 0 };
+    std::atomic<int64_t> degrainOutputRecordNs{ 0 };
+    std::atomic<int64_t> degrainStatsRecordNs{ 0 };
 };
 
 struct MotionVectorLumaCacheEntry final {
@@ -219,6 +224,8 @@ constexpr auto RIFEMVAvgAbsDxKey = "RMV_AvgAbsDx";
 constexpr auto RIFEMVAvgAbsDyKey = "RMV_AvgAbsDy";
 constexpr auto RIFEMVAvgAbsMotionKey = "RMV_AvgAbsMotion";
 constexpr auto RIFEMVPanAmountKey = "RMV_PanAmount";
+constexpr auto RIFEDegrainAvgSadKey = "RMVD_AvgSad";
+constexpr auto RIFEDegrainMaxSadKey = "RMVD_MaxSad";
 constexpr int MotionIsBackward = 0x00000002;
 constexpr int MotionUseChromaMotion = 0x00000008;
 constexpr int MVBlockReduceCenter = 0;
@@ -451,6 +458,11 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
     const auto sadPackedBuildNs = stats.sadPackedBuildNs.load(std::memory_order_relaxed);
     const auto outputFrameAllocNs = stats.outputFrameAllocNs.load(std::memory_order_relaxed);
     const auto outputPropertyNs = stats.outputPropertyNs.load(std::memory_order_relaxed);
+    const auto degrainSadRecordNs = stats.degrainSadRecordNs.load(std::memory_order_relaxed);
+    const auto degrainCenteredRecordNs = stats.degrainCenteredRecordNs.load(std::memory_order_relaxed);
+    const auto degrainAccumulateRecordNs = stats.degrainAccumulateRecordNs.load(std::memory_order_relaxed);
+    const auto degrainOutputRecordNs = stats.degrainOutputRecordNs.load(std::memory_order_relaxed);
+    const auto degrainStatsRecordNs = stats.degrainStatsRecordNs.load(std::memory_order_relaxed);
     const auto rifeProcessAccountedNs = flowSetupNs + flowCpuPrepNs + flowCommandRecordNs + flowSubmitWaitNs +
                                         flowReadbackInvalidateNs + flowReadbackMapNs + flowUnpackNs +
                                         flowExportDirectNs + flowExportResizeNs + flowCleanupNs + gpuInputCacheWaitNs;
@@ -535,6 +547,13 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
               << " sad_packed_build_ms=" << nsToMs(sadPackedBuildNs)
               << " output_frame_alloc_ms=" << nsToMs(outputFrameAllocNs)
               << " output_property_ms=" << nsToMs(outputPropertyNs) << std::endl;
+    if (degrainSadRecordNs || degrainAccumulateRecordNs || degrainOutputRecordNs) {
+        std::cerr << "  degrain_sad_record_ms=" << nsToMs(degrainSadRecordNs)
+                  << " degrain_centered_record_ms=" << nsToMs(degrainCenteredRecordNs)
+                  << " degrain_accumulate_record_ms=" << nsToMs(degrainAccumulateRecordNs)
+                  << " degrain_output_record_ms=" << nsToMs(degrainOutputRecordNs)
+                  << " degrain_stats_record_ms=" << nsToMs(degrainStatsRecordNs) << std::endl;
+    }
     std::cerr << "  local_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(localSemaphoreWaitNs) / flowCalls : 0.0)
               << " shared_wait_avg_ms=" << (flowCalls > 0 ? nsToMs(sharedSemaphoreWaitNs) / flowCalls : 0.0) << std::endl;
 }
@@ -2030,6 +2049,21 @@ struct RIFEMVOutputData final {
     bool backward;
     bool sadStats;
     bool motionStats;
+    bool perfStats;
+    std::shared_ptr<MotionVectorPerfStats> perf;
+};
+
+struct RIFEDegrainData final {
+    VSNode* inferenceNode;
+    VSNode* sourceNode;
+    VSVideoInfo vi;
+    int radius;
+    RIFEDegrainConfig config;
+    std::unique_ptr<RIFE> rife;
+    std::unique_ptr<std::counting_semaphore<>> semaphore;
+    std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
+    std::shared_ptr<MotionVectorPackedCache> packedCache;
+    bool sadStats;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
 };
@@ -3588,6 +3622,203 @@ static void VS_CC rifeMVOutputFree(void* instanceData, [[maybe_unused]] VSCore* 
     delete d;
 }
 
+// Convert native integer YUV planes to normalized float buffers for Vulkan processing.
+static void buildDegrainNativePlanes(const VSFrame* frame, std::array<ncnn::Mat, 3>& planes, const VSAPI* vsapi) {
+    const auto* format = vsapi->getVideoFrameFormat(frame);
+    const auto maxSample = static_cast<float>((1 << format->bitsPerSample) - 1);
+    for (int plane = 0; plane < 3; plane++) {
+        const auto width = vsapi->getFrameWidth(frame, plane);
+        const auto height = vsapi->getFrameHeight(frame, plane);
+        const auto stride = vsapi->getStride(frame, plane);
+        const auto* source = vsapi->getReadPtr(frame, plane);
+        planes[plane].create(width, height, sizeof(float), 1);
+        auto* destination = static_cast<float*>(planes[plane].data);
+        for (int y = 0; y < height; y++) {
+            const auto* row = source + static_cast<ptrdiff_t>(y) * stride;
+            for (int x = 0; x < width; x++) {
+                const auto sample = format->bytesPerSample == 1 ? row[x] : reinterpret_cast<const uint16_t*>(row)[x];
+                destination[static_cast<size_t>(y) * width + x] = sample / maxSample;
+            }
+        }
+    }
+}
+
+// Quantize normalized float results back to the source format without changing frame properties.
+static void writeDegrainNativePlanes(VSFrame* frame, const std::array<ncnn::Mat, 3>& planes, const VSAPI* vsapi) {
+    const auto* format = vsapi->getVideoFrameFormat(frame);
+    const auto maxSample = (1 << format->bitsPerSample) - 1;
+    for (int plane = 0; plane < 3; plane++) {
+        const auto width = vsapi->getFrameWidth(frame, plane);
+        const auto height = vsapi->getFrameHeight(frame, plane);
+        const auto stride = vsapi->getStride(frame, plane);
+        auto* destination = vsapi->getWritePtr(frame, plane);
+        const auto* source = static_cast<const float*>(planes[plane].data);
+        for (int y = 0; y < height; y++) {
+            auto* row = destination + static_cast<ptrdiff_t>(y) * stride;
+            for (int x = 0; x < width; x++) {
+                const auto value = std::clamp(static_cast<int>(std::floor(source[static_cast<size_t>(y) * width + x] * maxSample + 0.5f)), 0, maxSample);
+                if (format->bytesPerSample == 1)
+                    row[x] = static_cast<uint8_t>(value);
+                else
+                    reinterpret_cast<uint16_t*>(row)[x] = static_cast<uint16_t>(value);
+            }
+        }
+    }
+}
+
+static const VSFrame* VS_CC rifeDegrainGetFrame(int n, int activationReason, void* instanceData, [[maybe_unused]] void** frameData,
+                                                VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
+    auto* d = static_cast<RIFEDegrainData*>(instanceData);
+    if (activationReason == arInitial) {
+        vsapi->requestFrameFilter(n, d->inferenceNode, frameCtx);
+        vsapi->requestFrameFilter(n, d->sourceNode, frameCtx);
+        for (int delta = 1; delta <= d->radius; delta++) {
+            if (n - delta >= 0) {
+                vsapi->requestFrameFilter(n - delta, d->inferenceNode, frameCtx);
+                vsapi->requestFrameFilter(n - delta, d->sourceNode, frameCtx);
+            }
+            if (n + delta < d->vi.numFrames) {
+                vsapi->requestFrameFilter(n + delta, d->inferenceNode, frameCtx);
+                vsapi->requestFrameFilter(n + delta, d->sourceNode, frameCtx);
+            }
+        }
+        return nullptr;
+    }
+    if (activationReason != arAllFramesReady)
+        return nullptr;
+
+    const auto frame_start_ns = d->perfStats ? monotonicNowNs() : 0;
+    const VSFrame* currentInferenceFrame = vsapi->getFrameFilter(n, d->inferenceNode, frameCtx);
+    const VSFrame* currentSourceFrame = vsapi->getFrameFilter(n, d->sourceNode, frameCtx);
+    auto currentInference = getOrCreatePackedInferenceFrame(d->packedCache, currentInferenceFrame, n,
+                                                            currentInferenceFrame ? vsapi->getFrameWidth(currentInferenceFrame, 0) : 0,
+                                                            currentInferenceFrame ? vsapi->getFrameHeight(currentInferenceFrame, 0) : 0,
+                                                            d->perfStats ? d->perf.get() : nullptr, vsapi);
+    std::array<ncnn::Mat, 3> currentPlanes;
+    buildDegrainNativePlanes(currentSourceFrame, currentPlanes, vsapi);
+    std::array<const ncnn::Mat*, 3> currentPlanePointers{ &currentPlanes[0], &currentPlanes[1], &currentPlanes[2] };
+
+    std::vector<const VSFrame*> referenceInferenceFrames;
+    std::vector<const VSFrame*> referenceSourceFrames;
+    std::vector<std::shared_ptr<const ncnn::Mat>> referenceInference;
+    std::vector<std::array<ncnn::Mat, 3>> referencePlanes;
+    std::vector<RIFEDegrainReference> references;
+    std::vector<int> validSlots;
+    referenceInferenceFrames.reserve(d->radius * 2);
+    referenceSourceFrames.reserve(d->radius * 2);
+    referenceInference.reserve(d->radius * 2);
+    referencePlanes.reserve(d->radius * 2);
+    references.reserve(d->radius * 2);
+    for (int delta = 1; delta <= d->radius; delta++) {
+        const int indices[2]{ n - delta, n + delta };
+        for (int direction = 0; direction < 2; direction++) {
+            const auto index = indices[direction];
+            if (index < 0 || index >= d->vi.numFrames)
+                continue;
+            auto* inferenceFrame = vsapi->getFrameFilter(index, d->inferenceNode, frameCtx);
+            auto* sourceFrame = vsapi->getFrameFilter(index, d->sourceNode, frameCtx);
+            referenceInferenceFrames.push_back(inferenceFrame);
+            referenceSourceFrames.push_back(sourceFrame);
+            referenceInference.push_back(getOrCreatePackedInferenceFrame(d->packedCache, inferenceFrame, index,
+                                                                          vsapi->getFrameWidth(inferenceFrame, 0),
+                                                                          vsapi->getFrameHeight(inferenceFrame, 0),
+                                                                          d->perfStats ? d->perf.get() : nullptr, vsapi));
+            referencePlanes.emplace_back();
+            buildDegrainNativePlanes(sourceFrame, referencePlanes.back(), vsapi);
+            const auto& planes = referencePlanes.back();
+            references.push_back({ referenceInference.back().get(), { &planes[0], &planes[1], &planes[2] } });
+            validSlots.push_back((delta - 1) * 2 + direction);
+        }
+    }
+
+    std::array<ncnn::Mat, 3> outputPlanes;
+    std::array<ncnn::Mat*, 3> outputPlanePointers{ &outputPlanes[0], &outputPlanes[1], &outputPlanes[2] };
+    std::vector<RIFEDegrainStats> stats;
+    FlowPerfBreakdown flowPerf{};
+    int64_t local_wait_ns{};
+    int64_t shared_wait_ns{};
+    int64_t process_ns{};
+    int status{};
+    if (references.empty()) {
+        outputPlanes = currentPlanes;
+    } else {
+        const auto wait_start_ns = d->perfStats ? monotonicNowNs() : 0;
+        d->semaphore->acquire();
+        local_wait_ns = d->perfStats ? monotonicNowNs() - wait_start_ns : 0;
+        const auto shared_wait_start_ns = d->perfStats ? monotonicNowNs() : 0;
+        d->sharedFlowSemaphore->acquire();
+        shared_wait_ns = d->perfStats ? monotonicNowNs() - shared_wait_start_ns : 0;
+        const auto process_start_ns = d->perfStats ? monotonicNowNs() : 0;
+        status = d->rife->process_degrain(*currentInference, currentPlanePointers, references, d->config,
+                                          outputPlanePointers, d->sadStats ? &stats : nullptr,
+                                          d->perfStats ? &flowPerf : nullptr);
+        process_ns = d->perfStats ? monotonicNowNs() - process_start_ns : 0;
+        d->sharedFlowSemaphore->release();
+        d->semaphore->release();
+    }
+
+    VSFrame* output{};
+    if (status == 0) {
+        output = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, currentSourceFrame, core);
+        writeDegrainNativePlanes(output, outputPlanes, vsapi);
+        if (d->sadStats) {
+            std::vector<int64_t> average(d->radius * 2, -1);
+            std::vector<int64_t> maximum(d->radius * 2, -1);
+            for (size_t i = 0; i < stats.size(); i++) {
+                average[validSlots[i]] = static_cast<int64_t>(std::floor(stats[i].averageSad + 0.5f));
+                maximum[validSlots[i]] = static_cast<int64_t>(std::floor(stats[i].maximumSad + 0.5f));
+            }
+            auto* props = vsapi->getFramePropertiesRW(output);
+            for (int i = 0; i < d->radius * 2; i++) {
+                vsapi->mapSetInt(props, RIFEDegrainAvgSadKey, average[i], i == 0 ? maReplace : maAppend);
+                vsapi->mapSetInt(props, RIFEDegrainMaxSadKey, maximum[i], i == 0 ? maReplace : maAppend);
+            }
+        }
+    } else {
+        vsapi->setFilterError("RIFEDegrain: GPU denoising failed", frameCtx);
+    }
+
+    vsapi->freeFrame(currentInferenceFrame);
+    vsapi->freeFrame(currentSourceFrame);
+    for (const auto* frame : referenceInferenceFrames)
+        vsapi->freeFrame(frame);
+    for (const auto* frame : referenceSourceFrames)
+        vsapi->freeFrame(frame);
+    if (d->perfStats) {
+        accumulatePerfStat(d->perf->pairFrames, 1);
+        accumulatePerfStat(d->perf->flowCalls, static_cast<int64_t>(references.size()));
+        accumulatePerfStat(d->perf->pairTotalNs, monotonicNowNs() - frame_start_ns);
+        accumulatePerfStat(d->perf->localSemaphoreWaitNs, local_wait_ns);
+        accumulatePerfStat(d->perf->sharedSemaphoreWaitNs, shared_wait_ns);
+        accumulatePerfStat(d->perf->semaphoreWaitNs, local_wait_ns + shared_wait_ns);
+        accumulatePerfStat(d->perf->processFlowNs, process_ns);
+        accumulatePerfStat(d->perf->rifeProcessWallNs, process_ns);
+        accumulatePerfStat(d->perf->flowSetupNs, flowPerf.setupNs);
+        accumulatePerfStat(d->perf->flowCommandRecordNs, flowPerf.commandRecordNs);
+        accumulatePerfStat(d->perf->flowInferenceRecordNs, flowPerf.inferenceRecordNs);
+        accumulatePerfStat(d->perf->flowSubmitWaitNs, flowPerf.submitWaitNs);
+        accumulatePerfStat(d->perf->flowCleanupNs, flowPerf.cleanupNs);
+        accumulatePerfStat(d->perf->flowReadbackBytes, flowPerf.readbackBytes);
+        accumulatePerfStat(d->perf->degrainSadRecordNs, flowPerf.degrainSadRecordNs);
+        accumulatePerfStat(d->perf->degrainCenteredRecordNs, flowPerf.degrainCenteredRecordNs);
+        accumulatePerfStat(d->perf->degrainAccumulateRecordNs, flowPerf.degrainAccumulateRecordNs);
+        accumulatePerfStat(d->perf->degrainOutputRecordNs, flowPerf.degrainOutputRecordNs);
+        accumulatePerfStat(d->perf->degrainStatsRecordNs, flowPerf.degrainStatsRecordNs);
+    }
+    return output;
+}
+
+static void VS_CC rifeDegrainFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
+    auto* d = static_cast<RIFEDegrainData*>(instanceData);
+    if (d->perfStats && d->perf)
+        printMotionVectorPerfSummary(*d->perf, "RIFEDegrain(radius=" + std::to_string(d->radius) + ")");
+    vsapi->freeNode(d->inferenceNode);
+    vsapi->freeNode(d->sourceNode);
+    delete d;
+    if (--numGPUInstances == 0)
+        ncnn::destroy_gpu_instance();
+}
+
 static void validateCropGridAnalysisData(const MVAnalysisData& analysisData) {
     if (analysisData.nLvCount != 1)
         throw "only single-level MVTools vector clips are supported";
@@ -4068,11 +4299,197 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     vsapi->mapConsumeNode(out, "clip", forwardNode, maAppend);
 }
 
+static void VS_CC rifeDegrainCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
+    auto data = std::make_unique<RIFEDegrainData>();
+    VSNode* inputNode{};
+    VSNode* flowInputNode{};
+    bool hasGPUInstance{};
+    try {
+        int err{};
+        inputNode = vsapi->mapGetNode(in, "clip", 0, nullptr);
+        data->vi = *vsapi->getVideoInfo(inputNode);
+        if (!vsh::isConstantVideoFormat(&data->vi) || data->vi.format.colorFamily != cfYUV ||
+            data->vi.format.sampleType != stInteger || data->vi.format.bitsPerSample < 8 || data->vi.format.bitsPerSample > 16 ||
+            data->vi.format.numPlanes != 3 || data->vi.format.subSamplingW > 1 || data->vi.format.subSamplingH > 1)
+            throw "clip must be constant-format 8-16 bit integer YUV420, YUV422, YUV440, or YUV444";
+        flowInputNode = vsapi->mapGetNode(in, "flow_clip", 0, &err);
+        if (err)
+            flowInputNode = vsapi->addNodeRef(inputNode);
+        const auto flowInputVi = *vsapi->getVideoInfo(flowInputNode);
+        if (!vsh::isConstantVideoFormat(&flowInputVi) || flowInputVi.numFrames != data->vi.numFrames)
+            throw "flow_clip must have a constant format and the same frame count as clip";
+        if (static_cast<int64_t>(flowInputVi.width) * data->vi.height != static_cast<int64_t>(data->vi.width) * flowInputVi.height)
+            throw "flow_clip must have the same display aspect ratio as clip";
+        const auto sourceIdentity = reinterpret_cast<uintptr_t>(flowInputNode);
+        if (ncnn::create_gpu_instance())
+            throw "failed to create GPU instance";
+        ++numGPUInstances;
+        hasGPUInstance = true;
+
+        const auto modelPathValue = vsapi->mapGetData(in, "model_path", 0, &err);
+        const std::string modelPath = err ? "" : modelPathValue;
+        auto gpuId = vsapi->mapGetIntSaturated(in, "gpu_id", 0, &err);
+        if (err)
+            gpuId = ncnn::get_default_gpu_index();
+        auto gpuThread = vsapi->mapGetIntSaturated(in, "gpu_thread", 0, &err);
+        if (err)
+            gpuThread = 2;
+        auto sharedFlowInFlight = vsapi->mapGetIntSaturated(in, "shared_flow_inflight", 0, &err);
+        const auto sharedFlowSpecified = !err;
+        auto sharedPackedCache = !!vsapi->mapGetInt(in, "shared_packed_cache", 0, &err);
+        if (err)
+            sharedPackedCache = true;
+        auto packedCacheMiB = vsapi->mapGetIntSaturated(in, "packed_cache_mib", 0, &err);
+        if (err)
+            packedCacheMiB = 256;
+        auto flowScale = static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err));
+        if (err)
+            flowScale = 1.f;
+        auto resScale = static_cast<float>(vsapi->mapGetFloat(in, "res_scale", 0, &err));
+        if (err)
+            resScale = 1.f;
+        data->radius = vsapi->mapGetIntSaturated(in, "radius", 0, &err);
+        if (err)
+            data->radius = 1;
+        data->config.thSad = static_cast<float>(vsapi->mapGetFloat(in, "thsad", 0, &err));
+        if (err)
+            data->config.thSad = 400.f;
+        data->config.thSadC = static_cast<float>(vsapi->mapGetFloat(in, "thsadc", 0, &err));
+        if (err)
+            data->config.thSadC = data->config.thSad;
+        data->config.sadCenter = !!vsapi->mapGetInt(in, "sad_center", 0, &err);
+        if (err)
+            data->config.sadCenter = false;
+        data->config.sadCenterFloor = static_cast<float>(vsapi->mapGetFloat(in, "sad_center_floor", 0, &err));
+        if (err)
+            data->config.sadCenterFloor = 0.f;
+        data->config.limit = static_cast<float>(vsapi->mapGetFloat(in, "limit", 0, &err));
+        if (err)
+            data->config.limit = 255.f;
+        data->config.limitC = static_cast<float>(vsapi->mapGetFloat(in, "limitc", 0, &err));
+        if (err)
+            data->config.limitC = data->config.limit;
+        data->config.flowConsistency = static_cast<float>(vsapi->mapGetFloat(in, "flow_consistency", 0, &err));
+        if (err)
+            data->config.flowConsistency = 1.5f;
+        data->sadStats = !!vsapi->mapGetInt(in, "sad_stats", 0, &err);
+        if (err)
+            data->sadStats = false;
+        data->perfStats = !!vsapi->mapGetInt(in, "perf_stats", 0, &err);
+        if (err)
+            data->perfStats = false;
+        const auto conversionOptions = readMotionVectorColorConversionOptions(in, vsapi);
+
+        if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
+            throw "invalid GPU device";
+        if (gpuThread < 1)
+            throw "gpu_thread must be greater than 0";
+        const auto queueCount = std::max(1, static_cast<int>(ncnn::get_gpu_info(gpuId).compute_queue_count()));
+        if (!sharedFlowSpecified)
+            sharedFlowInFlight = queueCount;
+        if (sharedFlowInFlight < 1)
+            throw "shared_flow_inflight must be greater than 0";
+        if (packedCacheMiB < 1)
+            throw "packed_cache_mib must be greater than 0";
+        if (data->radius < 1 || data->radius > 3)
+            throw "radius must be between 1 and 3 (inclusive)";
+        if (!std::isfinite(data->config.thSad) || data->config.thSad < 0.f || data->config.thSad > 16320.f ||
+            !std::isfinite(data->config.thSadC) || data->config.thSadC < 0.f || data->config.thSadC > 16320.f)
+            throw "thsad and thsadc must be finite and between 0 and 16320 (inclusive)";
+        if (!std::isfinite(data->config.limit) || data->config.limit < 0.f || data->config.limit > 255.f ||
+            !std::isfinite(data->config.limitC) || data->config.limitC < 0.f || data->config.limitC > 255.f)
+            throw "limit and limitc must be finite and between 0 and 255 (inclusive)";
+        if (!std::isfinite(data->config.flowConsistency) || data->config.flowConsistency < 0.f || data->config.flowConsistency > 32.f)
+            throw "flow_consistency must be finite and between 0 and 32 source pixels (inclusive)";
+        if (!std::isfinite(data->config.sadCenterFloor) || data->config.sadCenterFloor < 0.f || data->config.sadCenterFloor > 1.f)
+            throw "sad_center_floor must be finite and between 0 and 1 (inclusive)";
+        if (!data->config.sadCenter && data->config.sadCenterFloor > 0.f)
+            throw "sad_center_floor requires sad_center=1";
+        validateAndNormalizeFlowScale(flowScale);
+        validateResScale(resScale);
+        const auto resolvedModel = resolveRIFEModel(modelPath);
+        if (isEarlyUnsupportedRIFEV4Model(resolvedModel.modelPath))
+            throw RIFEMVUnsupportedEarlyV4Error;
+        if (!supportsMotionVectorExport(resolvedModel))
+            throw RIFEMVModelRequirementError;
+
+        const auto inferenceWidth = computeInferenceDimension(flowInputVi.width, resScale, "width");
+        const auto inferenceHeight = computeInferenceDimension(flowInputVi.height, resScale, "height");
+        const auto clipSet = buildMotionVectorClipSet(flowInputNode, flowInputVi, nullptr, nullptr, conversionOptions,
+                                                      inferenceWidth, inferenceHeight, core, vsapi);
+        auto* nativeSourceNode = vsapi->addNodeRef(inputNode);
+        vsapi->freeNode(inputNode);
+        inputNode = nullptr;
+        vsapi->freeNode(flowInputNode);
+        flowInputNode = nullptr;
+        data->inferenceNode = clipSet.inferenceNode;
+        vsapi->freeNode(clipSet.sourceNode);
+        data->sourceNode = nativeSourceNode;
+        data->config.lumaWidth = data->vi.width;
+        data->config.lumaHeight = data->vi.height;
+        data->config.subSamplingW = data->vi.format.subSamplingW;
+        data->config.subSamplingH = data->vi.format.subSamplingH;
+        data->config.motionScaleX = static_cast<float>(data->vi.width) / inferenceWidth;
+        data->config.motionScaleY = static_cast<float>(data->vi.height) / inferenceHeight;
+        data->config.sadStats = data->sadStats;
+
+        const auto localFlowInFlight = sharedFlowSpecified ? std::max(gpuThread, sharedFlowInFlight) : gpuThread;
+        data->semaphore = std::make_unique<std::counting_semaphore<>>(localFlowInFlight);
+        data->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, sharedFlowInFlight);
+        const auto packedCacheMaxEntries = computePackedCacheMaxEntries(inferenceWidth, inferenceHeight, packedCacheMiB);
+        if (sharedPackedCache) {
+            SharedMotionVectorPackedCacheKey key{};
+            key.sourceIdentity = sourceIdentity;
+            key.inferenceWidth = inferenceWidth;
+            key.inferenceHeight = inferenceHeight;
+            key.convertedFromYUV = clipSet.inferenceConvertedFromYUV;
+            if (clipSet.inferenceConvertedFromYUV)
+                setMotionVectorConversionCacheKey(key, conversionOptions);
+            data->packedCache = acquireSharedPackedCache(key, packedCacheMaxEntries);
+        } else {
+            data->packedCache = createMotionVectorPackedCache(packedCacheMaxEntries);
+        }
+        if (data->perfStats)
+            data->perf = std::make_shared<MotionVectorPerfStats>();
+        data->rife = std::make_unique<RIFE>(gpuId, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4,
+                                            resolvedModel.padding, FlowResizeMode::ForceGPU,
+                                            resolvedModel.disableVulkanFp16, false, true);
+        loadRIFEModel(*data->rife, resolvedModel.modelPath);
+        std::cerr << "[rmv] RIFEDegrain parameters: gpu_id=" << gpuId << " radius=" << data->radius
+                  << " flow_scale=" << flowScale << " res_scale=" << resScale
+                  << " flow_input=" << flowInputVi.width << 'x' << flowInputVi.height
+                  << " inference=" << inferenceWidth << 'x' << inferenceHeight
+                  << " sad_center=" << data->config.sadCenter << " flow_consistency=" << data->config.flowConsistency
+                  << " sad_stats=" << data->sadStats << std::endl;
+
+        VSFilterDependency deps[]{ { data->inferenceNode, rpGeneral }, { data->sourceNode, rpGeneral } };
+        vsapi->createVideoFilter(out, "RIFEDegrain", &data->vi, rifeDegrainGetFrame, rifeDegrainFree,
+                                 fmParallel, deps, 2, data.get(), core);
+        data.release();
+    } catch (const std::exception& error) {
+        vsapi->mapSetError(out, ("RIFEDegrain: "s + error.what()).c_str());
+        vsapi->freeNode(inputNode);
+        vsapi->freeNode(flowInputNode);
+        vsapi->freeNode(data->inferenceNode);
+        vsapi->freeNode(data->sourceNode);
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
+    } catch (const char* error) {
+        vsapi->mapSetError(out, ("RIFEDegrain: "s + error).c_str());
+        vsapi->freeNode(inputNode);
+        vsapi->freeNode(flowInputNode);
+        vsapi->freeNode(data->inferenceNode);
+        vsapi->freeNode(data->sourceNode);
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
+    }
+}
+
 //////////////////////////////////////////
 // Init
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
-    vspapi->configPlugin("com.nmkd.rmv", "rmv", "RIFE motion-vector export plugin for MVTools workflows",
+    vspapi->configPlugin("com.nmkd.rmv", "rmv", "RIFE motion-vector export and dense temporal denoising plugin",
                          VS_MAKE_VERSION(9, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
 
     vspapi->registerFunction("CropGrid",
@@ -4119,4 +4536,29 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "chroma:int:opt;",
                              "clip:vnode[];",
                              rifeMVCreate, nullptr, plugin);
+    vspapi->registerFunction("RIFEDegrain",
+                             "clip:vnode;"
+                             "flow_clip:vnode:opt;"
+                             "model_path:data;"
+                             "radius:int:opt;"
+                             "thsad:float:opt;"
+                             "thsadc:float:opt;"
+                             "sad_center:int:opt;"
+                             "sad_center_floor:float:opt;"
+                             "limit:float:opt;"
+                             "limitc:float:opt;"
+                             "flow_consistency:float:opt;"
+                             "sad_stats:int:opt;"
+                             "gpu_id:int:opt;"
+                             "gpu_thread:int:opt;"
+                             "shared_flow_inflight:int:opt;"
+                             "shared_packed_cache:int:opt;"
+                             "packed_cache_mib:int:opt;"
+                             "flow_scale:float:opt;"
+                             "res_scale:float:opt;"
+                             "perf_stats:int:opt;"
+                             "matrix_in_s:data:opt;"
+                             "range_in_s:data:opt;",
+                             "clip:vnode;",
+                             rifeDegrainCreate, nullptr, plugin);
 }

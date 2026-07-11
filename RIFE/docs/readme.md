@@ -19,6 +19,9 @@ Interpolation is no longer part of this fork. Use the unmodified upstream RIFE p
 - `rmv.CropGrid(...)`
   Crops MVTools-compatible vector clips and matching `mv.Super` clips on the vector block-step grid.
 
+- `rmv.RIFEDegrain(...)`
+  Performs dense-flow motion-compensated temporal denoising directly on native YUV planes without MVTools vectors or an `mv.Super` clip.
+
 ## Important limitations
 
 - Motion-vector export supports `rife-v3.1`, `rife-v3.9`, and `rife-v4.2+` model families.
@@ -298,14 +301,62 @@ den = core.mv.Degrain2(clip, sup, bw1, fw1, bw2, fw2, thsad=500)
 - If you need both directions for delta 1, prefer `rmv.RIFEMV(...)`.
 - If you need several temporal distances, run one `rmv.RIFEMV(...)` instance for each `delta`.
 
+## `rmv.RIFEDegrain`
+
+`RIFEDegrain` is a self-contained dense-flow temporal denoiser based on MVTools Degrain weighting. RIFE flow remains GPU-resident; the filter reads back the completed native-plane image and optional compact SAD statistics, not dense flow.
+
+### Signature
+
+```python
+denoised = core.rmv.RIFEDegrain(
+    clip,
+    model_path=...,
+    flow_clip=None,
+    radius=1,
+    thsad=400.0,
+    thsadc=None,
+    sad_center=False,
+    sad_center_floor=0.0,
+    limit=255.0,
+    limitc=None,
+    flow_consistency=1.5,
+    sad_stats=False,
+    gpu_id=default_gpu,
+    gpu_thread=2,
+    shared_flow_inflight=None,
+    shared_packed_cache=True,
+    packed_cache_mib=256,
+    flow_scale=1.0,
+    res_scale=1.0,
+    perf_stats=False,
+    matrix_in_s=None,
+    range_in_s=None,
+)
+```
+
+The input must be constant-format 8-16 bit integer YUV420, YUV422, YUV440, or YUV444. The output preserves the input format, dimensions, frame count, and current-frame properties. RIFE inference uses the same internal RGBS conversion as `RIFEMV`, while warping and temporal accumulation operate on the original YUV planes.
+
+- `flow_clip` optionally supplies a prefiltered or lower-resolution RGBS/YUV analysis clip. It must have the same frame count and display aspect ratio as `clip`; only `clip` is denoised and returned. This is the dense-flow equivalent of using a separate prefilter for RIFEMV.
+- `radius` accepts `1` through `3`. An interior frame performs `2 * radius` flow inferences, using each past and future frame through that temporal distance. Missing references at clip boundaries are skipped.
+- `thsad` and `thsadc` are thresholds in 8-bit 8x8 SAD units. Chroma weights use the same luma-derived local SAD with the separate `thsadc` threshold. `thsadc` defaults to `thsad`.
+- `sad_center` enables locally mean-centered SAD. The effective value is capped at raw SAD and floored at `raw_sad * sad_center_floor`. The floor accepts `0.0` through `1.0` and requires centered SAD.
+- `limit` and `limitc` restrict changes from the current sample on a bit-depth-independent 0-255 scale. `limitc` defaults to `limit`; `255` effectively disables limiting and `0` reproduces the current plane.
+- `flow_consistency` attenuates references where current-to-reference and reference-to-current flow do not close within the given source-pixel distance. It defaults to `1.5`; use `0` to disable the occlusion/flow-confidence check.
+- `flow_scale`, `res_scale`, GPU selection, admission controls, packed inference caching, color-conversion overrides, and model support follow `RIFEMV`.
+- Explicit scene-change detection is not performed. References whose local SAD reaches the relevant threshold receive zero weight.
+- `perf_stats` reports flow-call and readback totals plus denoise SAD, centered-SAD, accumulation, output, and statistics command-recording time.
+
+With `sad_stats=True`, output frames contain `RMVD_AvgSad` and `RMVD_MaxSad` integer arrays in the same 8-bit 8x8 scale used by the thresholds. Their order is `past1, future1, past2, future2, past3, future3`, truncated to `2 * radius`; unavailable references contain `-1`.
+
 ## Summary
 
-This fork is now dedicated to exporting MVTools-compatible motion vectors from RIFE optical flow.
+This fork exports MVTools-compatible motion vectors and provides native dense-flow temporal denoising.
 
 The key idea is:
 
 - RIFE still runs on `RGBS` internally (with optional automatic YUV -> RGBS conversion in MV APIs)
 - MVTools still consumes its own vector-clip format
 - this build bridges the two by exporting MVTools-compatible binary vector properties
+- `RIFEDegrain` can instead consume dense flow internally without creating MVTools vectors
 
-Use the upstream RIFE plugin for interpolation and this fork for MVTools workflows.
+Use the upstream RIFE plugin for interpolation and this fork for motion-vector or temporal-denoising workflows.

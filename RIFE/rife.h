@@ -4,6 +4,7 @@
 #define RIFE_H
 
 #include <string>
+#include <array>
 #include <vector>
 #include <cstdint>
 #include <memory>
@@ -48,6 +49,11 @@ struct FlowPerfBreakdown final {
     int64_t gpuInputCacheHits{};
     int64_t gpuInputCacheMisses{};
     int64_t gpuInputCacheWaitNs{};
+    int64_t degrainSadRecordNs{};
+    int64_t degrainCenteredRecordNs{};
+    int64_t degrainAccumulateRecordNs{};
+    int64_t degrainOutputRecordNs{};
+    int64_t degrainStatsRecordNs{};
 };
 
 struct RIFEFlowReduceConfig final {
@@ -107,12 +113,39 @@ struct RIFEGpuPackedMotionVector final {
     uint32_t rawSad; // SAD remains unsigned 32-bit to preserve gpu_full range.
 };
 
+struct RIFEDegrainConfig final {
+    int lumaWidth;
+    int lumaHeight;
+    int subSamplingW;
+    int subSamplingH;
+    float motionScaleX;
+    float motionScaleY;
+    float thSad;
+    float thSadC;
+    float limit;
+    float limitC;
+    float flowConsistency;
+    bool sadCenter;
+    float sadCenterFloor;
+    bool sadStats;
+};
+
+struct RIFEDegrainReference final {
+    const ncnn::Mat* inference;
+    std::array<const ncnn::Mat*, 3> planes;
+};
+
+struct RIFEDegrainStats final {
+    float averageSad;
+    float maximumSad;
+};
+
 class RIFE
 {
 public:
     RIFE(int gpuid, float flow_scale = 1.f, int num_threads = 1, bool rife_v2 = false, bool rife_v4 = false,
          int padding = 32, FlowResizeMode flow_resize_mode = FlowResizeMode::Auto, bool disable_vulkan_fp16 = false,
-         bool enable_gpu_mv_full = false);
+         bool enable_gpu_mv_full = false, bool enable_degrain = false);
     ~RIFE();
 
 #if _WIN32
@@ -155,6 +188,10 @@ public:
     int process_motion_vectors_gpu_packed(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
                                           RIFEGpuPackedMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
                                           FlowPerfBreakdown* perf = nullptr) const;
+    int process_degrain(const ncnn::Mat& currentInference, const std::array<const ncnn::Mat*, 3>& currentPlanes,
+                        const std::vector<RIFEDegrainReference>& references, const RIFEDegrainConfig& config,
+                        const std::array<ncnn::Mat*, 3>& outputPlanes, std::vector<RIFEDegrainStats>* stats,
+                        FlowPerfBreakdown* perf = nullptr) const;
     int process_motion_vectors_gpu_packed(const ncnn::Mat& src0Packed, const ncnn::Mat& src1Packed,
                                           const ncnn::Mat& sadSrc0Packed, const ncnn::Mat& sadSrc1Packed,
                                           RIFEGpuPackedMotionVector* vectors, const RIFEGpuMotionVectorConfig& vectorConfig,
@@ -184,6 +221,10 @@ private:
     ncnn::Pipeline* rife_v4_timestep;
     ncnn::Pipeline* rife_mv_reduce;
     ncnn::Pipeline* rife_mv_full;
+    ncnn::Pipeline* rife_degrain_sad;
+    ncnn::Pipeline* rife_degrain_accumulate;
+    ncnn::Pipeline* rife_degrain_finish;
+    ncnn::Pipeline* rife_degrain_stats;
     ncnn::Layer* rife_flow_scale_image;
     ncnn::Layer* rife_flow_resize_flow;
     ncnn::Layer* rife_flow_scale_vectors;
@@ -199,6 +240,7 @@ private:
     bool rife_v4;
     bool disable_vulkan_fp16;
     bool enable_gpu_mv_full;
+    bool enable_degrain;
     int padding;
     std::string rife_v4_flow_blob_name;
     std::unique_ptr<ncnn::VkBlobAllocator> gpu_input_cache_allocator;
