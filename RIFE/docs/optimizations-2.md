@@ -402,12 +402,18 @@ The retained implementation was validated through combinations of:
 - Clean updated-NCNN 400-frame and 1000-frame runs after shader adaptation.
 - Integrity testing and hashing of the archived previous NCNN tree.
 
+Additionally, for validation the NCNN Vulkan device-loss fix:
+
+- Six full 1500-frame radius-3 concurrency stress runs with subgroup operations and automatic mid-inference submission disabled for RIFE.
+- A deliberate automatic-submission re-enable test that reproduced device loss around frame 3.
+
 ## Final state
 
 The current direction is intentionally conservative:
 
 - Use exact, separate `RIFEMV(delta=N)` instances for multiple temporal distances.
 - Preserve independent RIFE execution state so multiple deltas can overlap.
+- Disable NCNN Vulkan subgroup operations and automatic mid-inference submission for RIFE while retaining full cross-instance concurrency. (only relevant when using updates 2026 NCNN codebase)
 - Reuse uploaded inputs within each instance through a bounded, reusable cache.
 - Use `gpu_mode=3` when its signed-16-bit vector constraint is satisfied for the smallest readback and fastest measured exporter path.
 - Keep detailed profiling opt-in and use it before proposing another micro-optimization.
