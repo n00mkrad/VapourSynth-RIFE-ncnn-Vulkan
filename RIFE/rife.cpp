@@ -284,6 +284,9 @@ int RIFE::load(const std::string& modeldir)
     ncnn::Option opt;
     opt.num_threads = num_threads;
     opt.use_vulkan_compute = vkdev ? true : false;
+    // Avoid newer NCNN Vulkan paths that lose the device under concurrent RIFE streams.
+    opt.use_subgroup_ops = false;
+    opt.use_vulkan_auto_submit = false;
     opt.use_fp16_packed = vkdev && !disable_vulkan_fp16;
     opt.use_fp16_storage = vkdev && !disable_vulkan_fp16;
     opt.use_fp16_arithmetic = false;

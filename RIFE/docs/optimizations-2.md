@@ -173,6 +173,16 @@ After these adaptations, full property-parity checks passed for `gpu_mode=2` and
 
 Detailed GPU timing supports the headline result. Representative per-filter inference time fell from about **8.421–8.433 ms** to **7.838–7.849 ms**, approximately **6.9% lower**. GPU total time fell from about **10.815–10.847 ms** to **10.100–10.157 ms**, approximately **6.5% lower**. The GPU vector stage fell from about **0.360–0.376 ms** to **0.230–0.269 ms**, a reduction of roughly **28–36%**, while upload remained near **1.666–1.669 ms**.
 
+### Concurrent Vulkan device-loss compatibility fix
+
+After the NCNN update, concurrent RIFEMV workloads intermittently lost the Vulkan device and reported `vkQueueSubmit failed -4`. The subsequent blob-name extraction messages were cascading recovery failures after `VK_ERROR_DEVICE_LOST`, not missing model outputs.
+
+The failure was not eliminated by disabling FP16, disabling the GPU input cache, disabling only NCNN's new automatic mid-inference submission, reducing `gpu_thread` to 1, or limiting the shared flow semaphore to two concurrent calls. A global semaphore limit of one avoided the failure in diagnostic runs but reduced radius-3 throughput to approximately **28.70–29.75 FPS**, so serialization was not retained.
+
+Comparison with the archived NCNN tree identified two newly active Vulkan behaviors: subgroup operations now default to enabled, and NCNN can automatically submit a partially recorded inference command stream after its pending-dispatch threshold is reached. Stable concurrent operation required disabling both behaviors for RIFE. NCNN now exposes `use_vulkan_auto_submit`, defaulting to true, while the RIFE integration sets both `use_vulkan_auto_submit=false` and `use_subgroup_ops=false`. Other NCNN users retain the upstream automatic-submission default, and independent RIFE instances remain concurrent.
+
+With full `shared_flow_inflight=8` concurrency restored, five consecutive 1500-frame radius-3 stress runs completed at **37.05–37.24 FPS**. The final RIFEMV-scoped option implementation completed another run at **37.32 FPS**. Re-enabling automatic mid-inference submission while leaving subgroup operations disabled reproduced the device loss around frame 3. The radius-2 workload completed at **49.94 FPS**, so no performance regression was observed from the retained compatibility settings.
+
 ## Profiling and benchmarking infrastructure added in this thread
 
 ### Opt-in Vulkan timestamps
