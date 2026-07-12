@@ -185,6 +185,11 @@ else
 endif
 
 sources = [
+  'RIFE/CropGrid.cpp',
+  'RIFE/CropGrid.h',
+  'RIFE/MotionVectorGrid.h',
+  'RIFE/ScaleGrid.cpp',
+  'RIFE/ScaleGrid.h',
   'RIFE/plugin.cpp',
   'RIFE/rife.cpp',
   'RIFE/rife.h',

@@ -194,6 +194,48 @@ sup_crop = core.rmv.CropGrid(sup, left=1, right=1, vectors=mvfw)
 
 `CropGrid` v1 supports single-level vector clips, which matches the output from this plugin's `RIFEMV` function. Native multi-level MVTools vector clips are rejected.
 
+## `rmv.ScaleGrid`
+
+`ScaleGrid` rescales the vectors and SAD values in a single-level MVTools vector clip. By default it also rescales the MVTools geometry metadata and the black carrier clip so the result can be used with a matching clip at another resolution.
+
+### Signature
+
+```python
+scaled = core.rmv.ScaleGrid(clip, scale_x=None, scale_y=None, sad_scale=None, scale_meta=True, scale_clip=True, strict=True)
+```
+
+At least one of `scale_x`, `scale_y`, or `sad_scale` must be supplied. If only one geometric scale is supplied, it is used for both axes. If only `sad_scale` is supplied, both geometric scales remain `1.0`.
+
+`sad_scale=None` multiplies SAD by `scale_x * scale_y`, approximating the change in block area. An explicit `sad_scale` replaces that automatic multiplier. Area scaling keeps SAD magnitude approximately calibrated for the larger or smaller block, but SAD measured from a lower-resolution signal cannot reproduce detail from the target-resolution image.
+
+`scale_meta=True` scales source dimensions, block size, overlap, and padding in `MVTools_MVAnalysisData`. `scale_clip=True` scales the dummy carrier dimensions. These controls are independent; disabling either can intentionally produce metadata or carrier dimensions that no longer match each other.
+
+`strict=True` requires the scaled block size to be one supported by MVTools: `4x4`, `8x4`, `8x8`, `16x2`, `16x8`, `16x16`, `32x16`, `32x32`, `64x32`, `64x64`, `128x64`, or `128x128`. Strict overlap cannot exceed half the corresponding block size. With `strict=False`, any integral block size of at least `2x2` is accepted as long as overlap remains smaller than the block.
+
+Fractional scale factors are accepted only when the scaled dimensions, block geometry, and padding are sufficiently close to integers. The vector count does not change, so configure the low-resolution analysis block geometry to produce the grid needed at the target resolution. For example, a `2x` conversion from 1080p analysis to 4K target geometry can use `8x4` blocks with `4x2` overlap during analysis and expose them as `16x8` blocks with `8x4` overlap afterward:
+
+```python
+analysis = core.resize.Bicubic(clip, width=1920, height=1080)
+mvbw_small, mvfw_small = core.rmv.RIFEMV(
+    analysis,
+    model_path=rife_mdl,
+    gpu_mode=3,
+    blksize_x=8,
+    blksize_y=4,
+    overlap_x=4,
+    overlap_y=2,
+)
+
+mvbw = core.rmv.ScaleGrid(mvbw_small, scale_x=2.0)
+mvfw = core.rmv.ScaleGrid(mvfw_small, scale_x=2.0)
+```
+
+SAD-only adjustment leaves geometry and carrier dimensions unchanged:
+
+```python
+mvfw = core.rmv.ScaleGrid(mvfw, sad_scale=0.75)
+```
+
 ## `rmv.RIFEMV`
 
 `rmv.RIFEMV` exports both motion-vector directions for one configured temporal distance.

@@ -19,6 +19,28 @@ Temporal radius 3 reached **32.75 FPS** with the updated NCNN tree. Before that 
 
 The largest lesson is that this workload remains inference-bound. Reducing readback, record conversion, frame-property copying, and redundant uploads helps, but changes that serialize otherwise independent RIFE instances lose more throughput than their reuse saves.
 
+## Exact-scale `ScaleGrid` exporter optimization
+
+The vector-grid scaling stage became the dominant CPU cost when `rmv_mvscale=0.5` was used to run inference at half resolution and return vectors for the original-resolution clip. The old generic path measured **75.67 FPS at 15.6% average CPU** on the 1920x1024, temporal-radius-2 workload. Bypassing vector scaling entirely reached **117.74 FPS at 11.8% CPU**, establishing the practical upper bound for this graph.
+
+The retained implementation selects exact fast paths for uniform 2x and 0.5x geometry. It scales vector components and SAD values with checked integer arithmetic, including the same nearest-integer, away-from-zero half and quarter rounding as the generic path. It precomputes per-column and per-row clamp bounds, walks records as nested grid rows and columns, and transforms the source blob directly into a prepared output blob with unaligned-safe loads and stores. Clips with public SAD or motion-statistic groups continue through the generic path so their derived statistics retain the existing semantics.
+
+The carrier path now creates one immutable zero-filled template at filter creation and shares its plane buffers through `newVideoFrame2`, while frame properties remain independent. The transformed blob capacity is retained per worker thread, avoiding repeated allocation after the first frame. These changes remove the per-frame carrier zeroing/copy and the repeated full-blob allocation without changing the public API or metadata behavior.
+
+| Configuration | Result | Notes |
+| --- | ---: | --- |
+| Previous generic `rmv_mvscale=0.5` | 75.67 FPS, 15.6% CPU | 8x8 target grid, 1000 frames |
+| `ScaleGrid` bypass upper bound | 117.74 FPS, 11.8% CPU | Diagnostic path, no vector transformation |
+| Optimized `rmv_mvscale=0.5` | **104.40 FPS, 15.8% CPU** | 8x8 target grid, 1000 frames |
+| Optimized `rmv_mvscale=0.5`, `rmv_blks=16,16` | **138.24 FPS, 12.1% CPU** | 16x16 target grid, 1000 frames |
+| Optimized `rmv_mvscale=2.0` | **10.45 FPS, 8.7% CPU** | 3840x2048 analysis, 8x8 target grid, 1000 frames |
+
+The exact 0.5x result clears the target of 100 FPS and is about **38.0% faster** than the previous generic path. The remaining gap to the no-ScaleGrid upper bound is expected to include vector/blob property work and carrier/property construction; the SSE2 path was added because the scalar fast path remained more than ten percent below that bound. All successful measurements covered backward and forward vectors for temporal deltas 1 and 2.
+
+Several benchmark attempts printed `vkQueueSubmit failed -4` and stopped early. They were retried as directed and are treated as instability in the currently used NCNN/Vulkan integration, not as ScaleGrid failures. The reported results above are only completed 1000-frame runs.
+
+Short smoke runs also covered the `rmv_mvscale=1` no-op path, an explicit low-resolution SAD clip, and interlaced TFF processing. The latter produced 200 field frames with the expected 1920x512 target carrier and 8x8 target metadata. The full benchmarks exercised both backward and forward clips and temporal deltas 1 and 2.
+
 ## Benchmark workload and measurement rules
 
 ### Canonical command
